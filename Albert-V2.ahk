@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force
 
 ; ==============================================================================
@@ -10,7 +10,7 @@ global iniFile := A_ScriptDir . "\settings.ini"
 global todayKey := FormatTime(A_Now, "yyyy-MM-dd")
 global todaySales := IniRead(iniFile, "DailySales", todayKey, 0)
 
-; 0 = Normal, 1 = MicroSIP, 2 = Bitrix, 3 = Sverka, 4 = Telegram
+; 0 = Normal, 1 = MicroSIP, 2 = Bitrix, 3 = Sverka, 4 = Telegram, 5 = SAP
 global currentMode := 2  
 global lastWorkMode := 2
 
@@ -21,6 +21,13 @@ global statusF4 := "gaplashilingan"
 global statusSverkaF2 := "boradi"
 global statusSverkaF4 := "ko'chada"
 
+; Тексты, которые F3 и F4 вводят в режиме SAP.
+; Их можно изменить здесь, не затрагивая остальные сценарии скрипта.
+global sapF3Text := "Sayfuddinov Abdulloh"
+global sapF4Text := "Mijozni telefon raqamiga boglana olmadik"
+
+
+
 global callCount := 0
 global currentPhoneNum := "---"
 
@@ -29,7 +36,7 @@ global widgetsVisible := false
 global lastSipX := -1
 global lastSipY := -1
 
-ToolTip("Режим: BITRIX (F11/F12: Режимы | End: Normal)")
+ToolTip("Режим: BITRIX (F12: SAP | F11: Режимы | End: Normal)")
 SetTimer(() => ToolTip(), -3000)
 ; ==============================================================================
 ;                         2. ИНТЕРФЕЙС, ВИДЖЕТЫ MICROSIP И ИНДИКАТОР РЕЖИМА
@@ -60,7 +67,7 @@ global modeText := modeWidget.Add("Text", "cFFFFFF Center w105 h30 +0x200 Backgr
 
 MonitorGet(1, &ML, &MT, &MR, &MB)
 global modeGuiW := 105
-global modeGuiH := 35
+global modeGuiH := 37
 global modeGuiX := MR - 400
 global modeGuiY := MB - modeGuiH
 
@@ -69,6 +76,8 @@ modeWidget.Show("x" . modeGuiX . " y" . modeGuiY . " w" . modeGuiW . " h" . mode
 SetTimer(AttachWidgetsToMicroSip, 100)
 UpdateModeIndicator()
 
+; Обновляет постоянный виджет внизу экрана: выводит название активного режима
+; и повторно выводит окно поверх панели задач, не забирая фокус у рабочего окна.
 UpdateModeIndicator()
 {
     global currentMode, modeText, modeWidget, modeGuiX, modeGuiY, modeGuiW, modeGuiH
@@ -83,12 +92,17 @@ UpdateModeIndicator()
         modeText.Value := "SVERKA"
     else if (currentMode == 4)
         modeText.Value := "TELEGRAM"
+    else if (currentMode == 5)
+        modeText.Value := "SAP"
 
     ; Выталкиваем окно обратно на передний план поверх таскбара без перехвата фокуса
     modeWidget.Show("x" . modeGuiX . " y" . modeGuiY . " w" . modeGuiW . " h" . modeGuiH . " NoActivate")
     WinSetAlwaysOnTop(1, modeWidget.Hwnd)
 }
 
+; Каждые 100 мс ищет окно MicroSIP и держит рядом с ним два информационных
+; виджета. Также скрывает их при сворачивании/закрытии MicroSIP и обнуляет
+; дневную статистику при смене календарного дня.
 AttachWidgetsToMicroSip()
 {
     global infoWidget, daySalesWidget, todayKey, todaySales, iniFile, currentMode
@@ -176,6 +190,8 @@ AttachWidgetsToMicroSip()
 ;                         3. ВНУТРЕННИЕ ФУНКЦИИ И ЛОГИКА
 ; ==============================================================================
 
+; Синхронизирует текст виджетов с текущим номером, счётчиком попыток и числом
+; продаж за день. Вызывается после любого изменения этих данных.
 UpdateAllWidgetsDisplay()
 {
     global callCount, currentPhoneNum, todaySales
@@ -186,6 +202,7 @@ UpdateAllWidgetsDisplay()
     daySalesValText.Value := todaySales
 }
 
+; Сбрасывает количество попыток звонка для нового номера и сразу обновляет виджет.
 ResetCallAttemptCounter()
 {
     global callCount
@@ -193,6 +210,9 @@ ResetCallAttemptCounter()
     UpdateAllWidgetsDisplay()
 }
 
+; Извлекает из произвольного текста только цифры и проверяет длину номера.
+; При add998=true возвращает номер в международном виде 998XXXXXXXXX;
+; при false возвращает 9 цифр для ввода в MicroSIP. Некорректные данные дают Error.
 CleanAndFormatPhone(num, add998)
 {
     cleanNum := RegExReplace(num, "\D", "")
@@ -223,6 +243,9 @@ CleanAndFormatPhone(num, add998)
     }
 }
 
+; Ищет следующий корректный номер в таблице: копирует активную ячейку, при
+; необходимости идёт вниз, а явно испорченные номера помечает как Error.
+; Возвращает отформатированный номер либо Error, если поиск нужно остановить.
 SearchNextPhoneInTable(add998)
 {
     maxTries := 15
@@ -276,6 +299,8 @@ SearchNextPhoneInTable(add998)
     return "Error"
 }
 
+; Завершает текущий сценарий MicroSIP, записывает переданный статус в таблицу,
+; находит следующий номер и сразу переносит его в MicroSIP для нового звонка.
 HandleSipCallFlow(statusText)
 {
     global currentPhoneNum
@@ -306,11 +331,106 @@ HandleSipCallFlow(statusText)
     Send("{Ctrl Down}v{Ctrl Up}{Enter}")
 }
 
+; Режим SAP, F2: копирует номер, который пользователь заранее выделил двойным
+; щелчком; убирает код страны 998, активирует MicroSIP и звонит. Буфер обмена
+; сохраняется и восстанавливается, поэтому эта операция не портит копируемый текст.
+CallSelectedPhoneInSapMode()
+{
+    global currentPhoneNum, callCount
+
+    savedClipboard := ClipboardAll()
+    A_Clipboard := ""
+    Send("{Ctrl Down}c{Ctrl Up}")
+
+    if !ClipWait(0.5)
+    {
+        A_Clipboard := savedClipboard
+        ToolTip("Выделите номер двойным щелчком и нажмите F1")
+        SetTimer(() => ToolTip(), -1500)
+        return
+    }
+
+    phone := CleanAndFormatPhone(A_Clipboard, false)
+    if (phone == "Error")
+    {
+        A_Clipboard := savedClipboard
+        ToolTip("Выделенный текст не похож на номер")
+        SetTimer(() => ToolTip(), -1500)
+        return
+    }
+
+    if !WinExist("ahk_exe microsip.exe")
+    {
+        A_Clipboard := savedClipboard
+        ToolTip("MicroSIP не запущен")
+        SetTimer(() => ToolTip(), -1500)
+        return
+    }
+
+    currentPhoneNum := phone
+    ; Выбран новый номер: первая попытка всегда начинается с #1.
+    callCount := 1
+    UpdateAllWidgetsDisplay()
+
+    WinActivate("ahk_exe microsip.exe")
+    Sleep(100)
+    A_Clipboard := phone
+    Send("{Ctrl Down}a{Ctrl Up}")
+    Sleep(30)
+    Send("{Ctrl Down}v{Ctrl Up}{Enter}")
+    Sleep(80)
+    A_Clipboard := savedClipboard
+}
+
+; Режим SAP, F3/F4: печатает переданный текст в активное поле без использования
+; буфера обмена. Поэтому ранее скопированный номер или другой текст сохраняется.
+InsertSapText(textToInsert)
+{
+    SendText(textToInsert)
+}
+
+; Режим SAP, F1: повторно набирает текущий номер из виджета MicroSIP. В отличие
+; от F2 номер не копируется заново, а счётчик попыток увеличивается на единицу.
+RedialCurrentSapPhone()
+{
+    global currentPhoneNum, callCount
+
+    phone := CleanAndFormatPhone(currentPhoneNum, false)
+    if (phone == "Error" || currentPhoneNum == "---")
+    {
+        ToolTip("Сначала выберите номер через F2")
+        SetTimer(() => ToolTip(), -1500)
+        return
+    }
+
+    if !WinExist("ahk_exe microsip.exe")
+    {
+        ToolTip("MicroSIP не запущен")
+        SetTimer(() => ToolTip(), -1500)
+        return
+    }
+
+    savedClipboard := ClipboardAll()
+    A_Clipboard := phone
+    WinActivate("ahk_exe microsip.exe")
+    Sleep(100)
+    Send("{Ctrl Down}a{Ctrl Up}")
+    Sleep(30)
+    Send("{Ctrl Down}v{Ctrl Up}{Enter}")
+    Sleep(80)
+    A_Clipboard := savedClipboard
+
+    callCount++
+    UpdateAllWidgetsDisplay()
+}
+
 
 ; ==============================================================================
 ;                         4. НАСТРОЙКИ И ПЕРЕКЛЮЧЕНИЕ РЕЖИМОВ
 ; ==============================================================================
 
+; End всегда переводит скрипт в NORMAL: перехваченные клавиши вновь передаются
+; активной программе как обычно, а автоматизации временно не выполняются.
 ~End::
 {
     global currentMode
@@ -323,6 +443,7 @@ HandleSipCallFlow(statusText)
     }
 }
 
+; F11 поочерёдно переключает два CRM-режима: BITRIX и SVERKA.
 $F11::
 {
     global currentMode, lastWorkMode
@@ -340,23 +461,37 @@ $F11::
     SetTimer(() => ToolTip(), -1200)
 }
 
+
+; F12 циклически переключает: SAP → Telegram → MicroSIP → SAP.
 $F12::
 {
     global currentMode, lastWorkMode
 
-    if (currentMode != 4 && currentMode != 1)
+    ; Если был любой другой режим — сначала включается SAP.
+    if (currentMode != 5 && currentMode != 4 && currentMode != 1)
+        currentMode := 5
+    else if (currentMode == 5)
         currentMode := 4
     else if (currentMode == 4)
         currentMode := 1
     else
-        currentMode := 4
+        currentMode := 5
 
     lastWorkMode := currentMode
     UpdateModeIndicator()
-    ToolTip("РЕЖИМ: " . (currentMode == 4 ? "TELEGRAM" : "MICROSIP"))
-    SetTimer(() => ToolTip(), -1200)
+
+    if (currentMode == 5)
+        ToolTip("РЕЖИМ: SAP (F1 — повтор | F2 — номер | F3/F4 — текст)")
+    else if (currentMode == 4)
+        ToolTip("РЕЖИМ: TELEGRAM")
+    else
+        ToolTip("РЕЖИМ: MICROSIP")
+
+    SetTimer(() => ToolTip(), -1500)
 }
 
+
+; F10 открывает форму изменения текстов статусов для существующих сценариев.
 $F10::
 {
     global statusF2, statusF3, statusF4, statusSverkaF2, statusSverkaF4
@@ -383,6 +518,8 @@ $F10::
 
     settingsGui.Show()
 
+    ; Локальная функция окна настроек: считывает все поля формы в глобальные
+    ; переменные статусов, закрывает окно и показывает подтверждение сохранения.
     SaveSettings(*)
     {
         global statusF2, statusF3, statusF4, statusSverkaF2, statusSverkaF4
@@ -404,6 +541,8 @@ $F10::
 ;                         5. ОСНОВНЫЕ РАБОЧИЕ КЛАВИШИ (F1 - F9)
 ; ==============================================================================
 
+; F1 запускает действие, соответствующее активному режиму: в SAP повторно
+; звонит по текущему номеру, а в остальных режимах сохраняет прежний сценарий.
 $F1::
 {
     global callCount, currentPhoneNum, currentMode
@@ -413,7 +552,8 @@ $F1::
         return
     }
 
-    if (currentMode == 4)
+    
+    else if (currentMode == 4)
     {
         Send("{Ctrl Down}a{Ctrl Up}{Backspace}")
         Sleep(30)
@@ -432,7 +572,7 @@ $F1::
         Sleep(80)
         Send("{Ctrl Down}v{Ctrl Up}")
     }
-    else if (currentMode == 1 || currentMode == 2 || currentMode == 3)
+    else if (currentMode == 1 || currentMode == 2 || currentMode == 3 || currentMode == 5)
     {
         if WinExist("ahk_exe microsip.exe")
             WinActivate("ahk_exe microsip.exe")
@@ -448,6 +588,8 @@ $F1::
     }
 }
 
+; F2 выполняет второй сценарий режима: в SAP забирает выделенный номер и звонит,
+; а в остальных режимах оставляет исходную обработку статуса/номера без изменений.
 $F2::
 {
     global currentPhoneNum, callCount, currentMode
@@ -457,7 +599,12 @@ $F2::
         return
     }
 
-    if (currentMode == 1)
+    if (currentMode == 5)
+    {
+        CallSelectedPhoneInSapMode()
+        return
+    }
+    else if (currentMode == 1)
     {
         HandleSipCallFlow(statusF2)
     }
@@ -539,16 +686,23 @@ $F2::
     }
 }
 
+; F3 выполняет третий сценарий режима: в SAP вводит имя Sayfuddinov Abdulloh,
+; а в остальных режимах сохраняет их первоначальное поведение.
 $F3::
 {
-    global currentPhoneNum, callCount, currentMode
+    global currentPhoneNum, callCount, currentMode, sapF3Text
     if (currentMode == 0)
     {
         Send("{F3}")
         return
     }
 
-    if (currentMode == 1)
+    if (currentMode == 5)
+    {
+        InsertSapText(sapF3Text)
+        return
+    }
+    else if (currentMode == 1)
     {
         HandleSipCallFlow(statusF3)
     }
@@ -616,16 +770,23 @@ $F3::
     }
 }
 
+; F4 в SAP вводит текст о том, что с клиентом не удалось связаться; в остальных
+; режимах обслуживает прежние сценарии звонка, статусов и Telegram.
 $F4::
 {
-    global currentPhoneNum, callCount, currentMode
+    global currentPhoneNum, callCount, currentMode, sapF4Text
     if (currentMode == 0)
     {
         Send("{F4}")
         return
     }
 
-    if (currentMode == 1)
+    if (currentMode == 5)
+    {
+        InsertSapText(sapF4Text)
+        return
+    }
+    else if (currentMode == 1)
     {
         HandleSipCallFlow(statusF4)
     }
@@ -725,6 +886,7 @@ $F4::
     }
 }
 
+; F6 закрывает окно MicroSIP, если оно запущено, и сообщает результат пользователю.
 $F6::
 {
     if (currentMode == 0)
@@ -746,6 +908,7 @@ $F6::
     SetTimer(() => ToolTip(), -1200)
 }
 
+; F7 переносит номер из буфера в Telegram либо выполняет специальный шаг сверки.
 $F7::
 {
     global currentPhoneNum
@@ -798,6 +961,7 @@ $F7::
     }
 }
 
+; F8 вставляет данные в режиме сверки или очищает поле поиска Telegram.
 $F8::
 {
     if (currentMode == 0)
@@ -822,6 +986,7 @@ $F8::
     }
 }
 
+; F9 после явного подтверждения закрывает рабочие программы для подготовки к сверке.
 $F9::
 {
     if (currentMode == 0)
@@ -882,6 +1047,7 @@ $F9::
 ;                         6. СИСТЕМНЫЕ И ДОПОЛНИТЕЛЬНЫЕ КЛАВИШИ
 ; ==============================================================================
 
+; Volume Mute фиксирует завершённый звонок как продажу и увеличивает дневной счётчик.
 $Volume_Mute::
 {
     global currentMode, todayKey, todaySales, iniFile
@@ -913,6 +1079,7 @@ $Volume_Mute::
     Send("#{3}")
 }
 
+; PrintScreen отменяет одну продажу, не позволяя счётчику стать отрицательным.
 $PrintScreen::
 {
     global currentMode, todayKey, todaySales, iniFile
@@ -945,6 +1112,8 @@ $PrintScreen::
     SetTimer(() => ToolTip(), -1200)
 }
 
+; Медиа- и дополнительные клавиши открывают Telegram и запускают прежний сценарий
+; поиска/передачи номера из буфера обмена.
 $Launch_Media::
 $Launch_App1::
 $Launch_App2::
@@ -979,6 +1148,7 @@ $Launch_App2::
     Send("^#{Right}")
 }
 
+; Browser Home закрывает текущую вкладку и переключает виртуальный рабочий стол влево.
 $Browser_Home::
 {
     Send("^w")
@@ -986,16 +1156,19 @@ $Browser_Home::
     Send("^#{Left}")
 }
 
+; Volume Down переключает Windows на рабочий стол слева.
 $Volume_Down::
 {
     Send("^#{Left}")
 }
 
+; Volume Up переключает Windows на рабочий стол справа.
 $Volume_Up::
 {
     Send("^#{Right}")
 }
 
+; Insert строит окно со столбчатой статистикой продаж за последние десять дней.
 $Insert::
 {
     global iniFile, todaySales, todayKey
@@ -1073,9 +1246,75 @@ $Insert::
     chartGui.Show()
 }
 
+; Scroll Lock с подтверждением закрывает перечисленные программы и инициирует
+; выключение компьютера; Escape или повторный Scroll Lock отменяют операцию.
+$ScrollLock::
+{
+    ToolTip("⚠️ ВНИМАНИЕ! Нажмите ENTER для ЗАКРЫТИЯ ПРОГРАММ И ВЫКЛЮЧЕНИЯ ПК (Escape для отмены)")
+    
+    loop
+    {
+        if KeyWait("Enter", "D T 5")
+        {
+            ToolTip()
+            break
+        }
+        else if KeyWait("Escape", "D") || KeyWait("ScrollLock", "D")
+        {
+            ToolTip("Отменено.")
+            SetTimer(() => ToolTip(), -1000)
+            return
+        }
+        else
+        {
+            ToolTip()
+            return
+        }
+    }
+
+    ToolTip("Закрытие всех программ...")
+    
+    killList := [
+        "sublime_text.exe",
+        "microsip.exe",
+        "Telegram.exe",
+        "chrome.exe",
+        "browser.exe",
+        "calc.exe",
+        "CalculatorApp.exe",
+        "wps.exe",
+        "et.exe",
+        "excel.exe"
+    ]
+
+    for proc in killList
+    {
+        while ProcessExist(proc)
+        {
+            ProcessClose(proc)
+            Sleep(50)
+        }
+    }
+
+    ToolTip("Выключение компьютера...")
+    Send("#d")
+    Sleep(500)
+    WinActivate("ahk_class Progman") 
+    Sleep(200)
+    Click(10, 10)
+    Sleep(300)
+    Send("!{F4}")
+    Sleep(1000)
+    Send("{Enter}")
+    ToolTip()
+}
+
+
 ; ==============================================================================
 ;        7. УМНАЯ КЛАВИША Ё / ТИЛЬДА (SC029) - МЕГА КОМБО РОБОТ И ПАУЗА МУЗЫКИ
 ; ==============================================================================
+; Ё/тильда: в русском языке вводит символ, в SVERKA управляет музыкой, а в
+; английской раскладке запускает существующий сценарий отправки заказа в Telegram.
 $*SC029::
 {
     global currentMode
