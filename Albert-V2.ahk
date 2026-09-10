@@ -685,27 +685,30 @@ $F2::
         Send("{Delete 3}")
     }
 }
-
-; F3 выполняет третий сценарий режима: в SAP вводит имя Sayfuddinov Abdulloh,
-; а в остальных режимах сохраняет их первоначальное поведение.
 $F3::
 {
-    global currentPhoneNum, callCount, currentMode, sapF3Text
+    global currentPhoneNum, callCount, currentMode, sapF3Text, statusF3
+
     if (currentMode == 0)
     {
         Send("{F3}")
         return
     }
 
+    ; SAP: вставить имя сотрудника.
     if (currentMode == 5)
     {
         InsertSapText(sapF3Text)
         return
     }
+
+    ; MicroSIP: прежний сценарий статуса F3.
     else if (currentMode == 1)
     {
         HandleSipCallFlow(statusF3)
     }
+
+    ; Bitrix: очистить поиск Telegram.
     else if (currentMode == 2)
     {
         if WinExist("ahk_exe Telegram.exe")
@@ -716,16 +719,30 @@ $F3::
         Sleep(30)
         Send("{Delete 3}")
     }
+
+    ; SVERKA: записать статус в клетку справа, перейти к следующему номеру и позвонить.
     else if (currentMode == 3)
     {
+        ; Завершаем текущий звонок и возвращаемся в таблицу.
         Send("{Enter}")
         Sleep(50)
         Send("!{Tab}")
         Sleep(100)
 
-        Send("{Down}")
+        ; Переходим в ячейку статуса справа от номера.
+        Send("{Right}")
         Sleep(50)
 
+        ; Записываем «ko'tarmadi».
+        A_Clipboard := statusF3
+        Send("{Ctrl Down}v{Ctrl Up}")
+        Sleep(40)
+
+        ; Enter сохраняет статус. Затем возвращаемся к номеру следующей строки.
+        Send("{Enter}{Up}{Left}{Down}")
+        Sleep(60)
+
+        ; Копируем следующий номер.
         A_Clipboard := ""
         Send("{Ctrl Down}c{Ctrl Up}")
         if !ClipWait(0.4)
@@ -735,11 +752,13 @@ $F3::
         if (phone == "Error")
             return
 
+        ; Для нового номера первая попытка — #1.
         currentPhoneNum := phone
         ResetCallAttemptCounter()
         callCount := 1
         UpdateAllWidgetsDisplay()
 
+        ; Возвращаемся в MicroSIP и звоним.
         A_Clipboard := phone
         Send("!{Tab}")
         Sleep(100)
@@ -747,6 +766,8 @@ $F3::
         Sleep(30)
         Send("{Ctrl Down}v{Ctrl Up}{Enter}")
     }
+
+    ; Telegram: прежний поиск следующего номера.
     else if (currentMode == 4)
     {
         Send("{Ctrl Down}a{Ctrl Up}{Backspace}")
