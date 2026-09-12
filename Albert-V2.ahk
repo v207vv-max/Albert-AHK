@@ -67,13 +67,14 @@ global modeText := modeWidget.Add("Text", "cFFFFFF Center w105 h30 +0x200 Backgr
 
 MonitorGet(1, &ML, &MT, &MR, &MB)
 global modeGuiW := 105
-global modeGuiH := 37
-global modeGuiX := MR - 400
+global modeGuiH := 35
+global modeGuiX := MR - 450
 global modeGuiY := MB - modeGuiH
 
 modeWidget.Show("x" . modeGuiX . " y" . modeGuiY . " w" . modeGuiW . " h" . modeGuiH . " NoActivate")
 
 SetTimer(AttachWidgetsToMicroSip, 100)
+SetTimer(KeepModeIndicatorVisible, 300)
 UpdateModeIndicator()
 
 ; Обновляет постоянный виджет внизу экрана: выводит название активного режима
@@ -95,9 +96,36 @@ UpdateModeIndicator()
     else if (currentMode == 5)
         modeText.Value := "SAP"
 
-    ; Выталкиваем окно обратно на передний план поверх таскбара без перехвата фокуса
-    modeWidget.Show("x" . modeGuiX . " y" . modeGuiY . " w" . modeGuiW . " h" . modeGuiH . " NoActivate")
+    ; Возвращаем индикатор поверх Taskbar без перехвата фокуса
     WinSetAlwaysOnTop(1, modeWidget.Hwnd)
+
+    modeWidget.Show(
+        "x" . modeGuiX .
+        " y" . modeGuiY .
+        " w" . modeGuiW .
+        " h" . modeGuiH .
+        " NoActivate"
+    )
+}
+KeepModeIndicatorVisible()
+{
+    global modeWidget, modeGuiX, modeGuiY, modeGuiW, modeGuiH
+
+    try
+    {
+        if !WinExist("ahk_id " . modeWidget.Hwnd)
+            return
+
+        WinSetAlwaysOnTop(1, modeWidget.Hwnd)
+
+        modeWidget.Show(
+            "x" . modeGuiX .
+            " y" . modeGuiY .
+            " w" . modeGuiW .
+            " h" . modeGuiH .
+            " NoActivate"
+        )
+    }
 }
 
 ; Каждые 100 мс ищет окно MicroSIP и держит рядом с ним два информационных
@@ -1265,6 +1293,16 @@ $Insert::
     closeBtn.OnEvent("Click", (*) => chartGui.Destroy())
 
     chartGui.Show()
+}
+
+
+$PgDn::{
+    Send("#r")
+    Sleep(120)
+    SendText("cmd")
+    Sleep(120)
+    Send("{Enter}")
+
 }
 
 ; Scroll Lock с подтверждением закрывает перечисленные программы и инициирует
