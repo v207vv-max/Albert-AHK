@@ -1096,34 +1096,82 @@ $F9::
 ;                         6. СИСТЕМНЫЕ И ДОПОЛНИТЕЛЬНЫЕ КЛАВИШИ
 ; ==============================================================================
 
-; Volume Mute фиксирует завершённый звонок как продажу и увеличивает дневной счётчик.
 $Volume_Mute::
 {
     global currentMode, todayKey, todaySales, iniFile
+
     if (currentMode == 0)
     {
         Send("{Volume_Mute}")
         return
     }
-    
+
     Sleep(250)
     Send("#{1}")
-    Sleep(250)
+    Sleep(350)
     Send("{Enter}")
+    Sleep(350)
+
+    ; ============================================================
+    ; ОБНОВЛЯЕМ ДАТУ
+    ; ============================================================
 
     currentDay := FormatTime(A_Now, "yyyy-MM-dd")
+
     if (currentDay != todayKey)
     {
         todayKey := currentDay
         todaySales := IniRead(iniFile, "DailySales", todayKey, 0)
     }
 
+    ; ============================================================
+    ; ОБЩАЯ СТАТИСТИКА ЗА ДЕНЬ
+    ; ============================================================
+
     todaySales++
-    IniWrite(todaySales, iniFile, "DailySales", todayKey)
+
+    IniWrite(
+        todaySales,
+        iniFile,
+        "DailySales",
+        todayKey
+    )
+
+    ; ============================================================
+    ; ПОЧАСОВАЯ СТАТИСТИКА
+    ; ============================================================
+
+    currentHour := FormatTime(A_Now, "HH")
+    hourKey := todayKey . "_" . currentHour
+
+    hourSales := IniRead(
+        iniFile,
+        "HourlySales",
+        hourKey,
+        0
+    )
+
+    hourSales++
+
+    IniWrite(
+        hourSales,
+        iniFile,
+        "HourlySales",
+        hourKey
+    )
+
+    ; ============================================================
+    ; ОБНОВЛЕНИЕ ОСНОВНОГО ИНТЕРФЕЙСА
+    ; ============================================================
+
     UpdateAllWidgetsDisplay()
 
-    ToolTip("Звонок завершен! Продаж сегодня: " . todaySales)
+    ToolTip(
+        "Звонок завершен! Продаж сегодня: " . todaySales
+    )
+
     SetTimer(() => ToolTip(), -1200)
+
     Sleep(300)
     Send("#{3}")
 }
@@ -1216,83 +1264,574 @@ $Volume_Up::
 {
     Send("^#{Right}")
 }
+; ================================================================
+; INSERT — СТАТИСТИКА ПРОДАЖ ЗА ПОСЛЕДНИЕ 10 ДНЕЙ
+; ================================================================
 
-; Insert строит окно со столбчатой статистикой продаж за последние десять дней.
 $Insert::
 {
+    global currentMode
+
+    if (currentMode == 0)
+    {
+        Send("{Insert}")
+        return
+    }
+
+    ShowDailyStats()
+}
+
+ShowDailyStats()
+{
     global iniFile, todaySales, todayKey
-    
-    salesData := ""
-    try {
-        salesData := IniRead(iniFile, "DailySales",, "")
-    }
-    
-    chartGui := Gui("+AlwaysOnTop", "Статистика продаж по дням")
+
+    ; ============================================================
+    ; СОЗДАЁМ ОКНО
+    ; ============================================================
+
+    chartGui := Gui(
+        "+AlwaysOnTop +Border",
+        "Статистика продаж"
+    )
+
     chartGui.BackColor := "FFFFFF"
+    chartGui.MarginX := 25
+    chartGui.MarginY := 20
 
-    chartGui.SetFont("s12 bold", "Segoe UI")
-    chartGui.Add("Text", "w420 Center c0066CC +0x200", "ГРАФИК ПРОДАЖ ПО ДНЯМ")
+    ; ============================================================
+    ; ЗАГОЛОВОК
+    ; ============================================================
 
-    chartGui.SetFont("s10 norm", "Segoe UI")
-    chartGui.Add("Text", "w420 Center c777777", "Сегодня (" . todayKey . "): " . todaySales . " продаж")
-    chartGui.Add("Text", "w420 0x10 y+8")
+    chartGui.SetFont(
+        "s16 bold",
+        "Segoe UI"
+    )
 
-    dateList := []
+    chartGui.Add(
+        "Text",
+        "x25 y20 w620 Center c0066CC",
+        "СТАТИСТИКА ПРОДАЖ"
+    )
+
+    chartGui.SetFont(
+        "s10",
+        "Segoe UI"
+    )
+
+    chartGui.Add(
+        "Text",
+        "x25 y52 w620 Center c777777",
+        "Последние 10 дней"
+    )
+
+    chartGui.Add(
+        "Text",
+        "x25 y78 w620 h1 BackgroundD9D9D9"
+    )
+
+    ; ============================================================
+    ; СНАЧАЛА НАХОДИМ МАКСИМАЛЬНОЕ ЗНАЧЕНИЕ
+    ; ============================================================
+
     maxVal := 1
-    foundToday := false
 
-    if (salesData != "")
+    Loop 10
     {
-        for line in StrSplit(salesData, "`n", "`r")
+        daysAgo := A_Index - 1
+
+        dateKey := FormatTime(
+            DateAdd(A_Now, -daysAgo, "Days"),
+            "yyyy-MM-dd"
+        )
+
+        value := IniRead(
+            iniFile,
+            "DailySales",
+            dateKey,
+            0
+        )
+
+        try
         {
-            if (line == "" || !InStr(line, "="))
-                continue
-            parts := StrSplit(line, "=")
-            dStr := Trim(parts[1])
-            vNum := Integer(Trim(parts[2]))
-            dateList.Push({date: dStr, val: vNum})
-            if (dStr == todayKey)
-                foundToday := true
-            if (vNum > maxVal)
-                maxVal := vNum
+            value := Integer(value)
         }
+        catch
+        {
+            value := 0
+        }
+
+        if (value > maxVal)
+            maxVal := value
     }
 
-    if (!foundToday)
+    ; ============================================================
+    ; РИСУЕМ ПОСЛЕДНИЕ 10 ДНЕЙ
+    ; От старого к новому
+    ; ============================================================
+
+    y := 100
+
+    Loop 10
     {
-        dateList.Push({date: todayKey, val: todaySales})
-        if (todaySales > maxVal)
-            maxVal := todaySales
-    }
+        daysAgo := 10 - A_Index
 
-    startIndex := (dateList.Length > 10) ? dateList.Length - 9 : 1
+        dateKey := FormatTime(
+            DateAdd(A_Now, -daysAgo, "Days"),
+            "yyyy-MM-dd"
+        )
 
-    Loop (dateList.Length - startIndex + 1)
-    {
-        idx := startIndex + A_Index - 1
-        item := dateList[idx]
-        
-        barW := Integer((item.val / maxVal) * 200)
-        if (barW < 4 && item.val > 0)
-            barW := 4
+        ; --------------------------------------------------------
+        ; Получаем продажи за этот день
+        ; --------------------------------------------------------
 
-        chartGui.SetFont("s10 norm", "Segoe UI")
-        chartGui.Add("Text", "w85 y+8 c333333", item.date)
-        
-        if (item.val > 0)
-            chartGui.Add("Progress", "x+5 w" . barW . " h18 BackgroundE0E0E0 c008800 Range0-100", 100)
+        if (dateKey == todayKey)
+        {
+            value := todaySales
+        }
         else
-            chartGui.Add("Text", "x+5 w10 h18 c999999", "-")
-            
-        chartGui.SetFont("s10 bold", "Segoe UI")
-        chartGui.Add("Text", "x+10 h18 c000000", item.val)
+        {
+            value := IniRead(
+                iniFile,
+                "DailySales",
+                dateKey,
+                0
+            )
+
+            try
+            {
+                value := Integer(value)
+            }
+            catch
+            {
+                value := 0
+            }
+        }
+
+        ; --------------------------------------------------------
+        ; Дата
+        ; --------------------------------------------------------
+
+        chartGui.SetFont(
+            "s10",
+            "Segoe UI"
+        )
+
+        chartGui.Add(
+            "Text",
+            "x25 y" . y . " w90 h22 c333333",
+            dateKey
+        )
+
+        ; --------------------------------------------------------
+        ; Процент заполнения
+        ; --------------------------------------------------------
+
+        percent := 0
+
+        if (value > 0)
+            percent := (value / maxVal) * 100
+
+        ; --------------------------------------------------------
+        ; Полоса
+        ; --------------------------------------------------------
+
+        chartGui.Add(
+            "Progress",
+            "x125 y" . y
+            . " w400 h20"
+            . " BackgroundE5E5E5"
+            . " c008800"
+            . " Range0-100",
+            percent
+        )
+
+        ; --------------------------------------------------------
+        ; Число продаж
+        ; --------------------------------------------------------
+
+        chartGui.SetFont(
+            "s10 bold",
+            "Segoe UI"
+        )
+
+        chartGui.Add(
+            "Text",
+            "x540 y" . y . " w60 h22 c222222",
+            value
+        )
+
+        y += 34
     }
 
-    chartGui.SetFont("s10 norm", "Segoe UI")
-    closeBtn := chartGui.Add("Button", "w120 x160 y+20 Default", "Закрыть")
-    closeBtn.OnEvent("Click", (*) => chartGui.Destroy())
+    ; ============================================================
+    ; ИТОГ
+    ; ============================================================
 
-    chartGui.Show()
+    chartGui.Add(
+        "Text",
+        "x25 y" . (y + 5)
+        . " w620 h1 BackgroundD9D9D9"
+    )
+
+    chartGui.SetFont(
+        "s11 bold",
+        "Segoe UI"
+    )
+
+    chartGui.Add(
+        "Text",
+        "x25 y" . (y + 18)
+        . " w400 h30 c0066CC",
+        "Сегодня: " . todaySales . " продаж"
+    )
+
+    ; ============================================================
+    ; КНОПКА
+    ; ============================================================
+
+    closeBtn := chartGui.Add(
+        "Button",
+        "x520 y" . (y + 15)
+        . " w125 h30 Default",
+        "Закрыть"
+    )
+
+    closeBtn.OnEvent(
+        "Click",
+        (*) => chartGui.Destroy()
+    )
+
+    chartGui.OnEvent(
+        "Close",
+        (*) => chartGui.Destroy()
+    )
+
+    ; ============================================================
+    ; ПОКАЗЫВАЕМ ОКНО
+    ; ============================================================
+
+    chartGui.Show(
+        "w680 h" . (y + 60)
+    )
+}
+
+; ================================================================
+; HOME — ПОЧАСОВАЯ СТАТИСТИКА ЗА СЕГОДНЯ
+; ================================================================
+
+$Home::
+{
+    global currentMode
+
+    if (currentMode == 0)
+    {
+        Send("{Home}")
+        return
+    }
+
+    ShowHourlyStats()
+}
+
+
+; ================================================================
+; ЗАПИСЬ ЗВОНКА В ПОЧАСОВУЮ СТАТИСТИКУ
+; ================================================================
+
+RecordCallAttempt()
+{
+    global iniFile
+
+    currentDay := FormatTime(
+        A_Now,
+        "yyyy-MM-dd"
+    )
+
+    currentHour := FormatTime(
+        A_Now,
+        "HH"
+    )
+
+    hourKey := currentDay . "_" . currentHour
+
+    callCountHour := IniRead(
+        iniFile,
+        "HourlyCalls",
+        hourKey,
+        0
+    )
+
+    try
+    {
+        callCountHour := Integer(callCountHour)
+    }
+    catch
+    {
+        callCountHour := 0
+    }
+
+    callCountHour++
+
+    IniWrite(
+        callCountHour,
+        iniFile,
+        "HourlyCalls",
+        hourKey
+    )
+}
+
+
+
+ShowHourlyStats()
+{
+    global iniFile, todayKey, todaySales
+
+    ; ============================================================
+    ; СОБИРАЕМ СТАТИСТИКУ ЗА КАЖДЫЙ ЧАС
+    ; ============================================================
+
+    hourlyData := []
+
+    maxVal := 1
+
+    Loop 24
+    {
+        hour := A_Index - 1
+
+        hourText := Format("{:02}", hour)
+
+        hourKey := todayKey . "_" . hourText
+
+        value := IniRead(
+            iniFile,
+            "HourlySales",
+            hourKey,
+            0
+        )
+
+        try
+        {
+            value := Integer(value)
+        }
+        catch
+        {
+            value := 0
+        }
+
+        hourlyData.Push({
+            hour: hour,
+            val: value
+        })
+
+        if (value > maxVal)
+            maxVal := value
+    }
+
+    ; ============================================================
+    ; СОЗДАЁМ ОКНО
+    ; ============================================================
+
+    hourlyGui := Gui(
+        "+AlwaysOnTop +Border",
+        "Продажи по часам"
+    )
+
+    hourlyGui.BackColor := "FFFFFF"
+
+    hourlyGui.MarginX := 25
+    hourlyGui.MarginY := 20
+
+    ; ============================================================
+    ; ЗАГОЛОВОК
+    ; ============================================================
+
+    hourlyGui.SetFont(
+        "s16 bold",
+        "Segoe UI"
+    )
+
+    hourlyGui.Add(
+        "Text",
+        "x25 y20 w700 h30 Center c0066CC",
+        "ПРОДАЖИ ПО ЧАСАМ"
+    )
+
+    hourlyGui.SetFont(
+        "s10",
+        "Segoe UI"
+    )
+
+    hourlyGui.Add(
+        "Text",
+        "x25 y52 w700 h22 Center c777777",
+        todayKey . "    •    Всего продаж: " . todaySales
+    )
+
+    ; Разделитель
+
+    hourlyGui.Add(
+        "Text",
+        "x25 y78 w700 h1 BackgroundD9D9D9"
+    )
+
+    ; ============================================================
+    ; НАСТРОЙКИ ТАБЛИЦЫ
+    ; ============================================================
+
+    leftX := 25
+    rightX := 385
+
+    startY := 100
+    rowH := 40
+
+    ; ============================================================
+    ; 24 ЧАСА → 2 КОЛОНКИ ПО 12
+    ; ============================================================
+
+    Loop 24
+    {
+        idx := A_Index
+
+        item := hourlyData[idx]
+
+        ; --------------------------------------------------------
+        ; Определяем колонку
+        ; --------------------------------------------------------
+
+        if (idx <= 12)
+        {
+            x := leftX
+            row := idx - 1
+        }
+        else
+        {
+            x := rightX
+            row := idx - 13
+        }
+
+        y := startY + (row * rowH)
+
+        ; --------------------------------------------------------
+        ; Время
+        ; --------------------------------------------------------
+
+        hourStart := Format(
+            "{:02}:00",
+            item.hour
+        )
+
+        nextHour := Mod(
+            item.hour + 1,
+            24
+        )
+
+        hourEnd := Format(
+            "{:02}:00",
+            nextHour
+        )
+
+        hourlyGui.SetFont(
+            "s9",
+            "Segoe UI"
+        )
+
+        hourlyGui.Add(
+            "Text",
+            "x" . x
+            . " y" . y
+            . " w75 h22 c444444",
+            hourStart . "–" . hourEnd
+        )
+
+        ; --------------------------------------------------------
+        ; ПРОГРЕСС-БАР
+        ; --------------------------------------------------------
+
+        percent := 0
+
+        if (item.val > 0)
+            percent := (item.val / maxVal) * 100
+
+        hourlyGui.Add(
+            "Progress",
+            "x" . (x + 80)
+            . " y" . y
+            . " w180 h20"
+            . " BackgroundE8E8E8"
+            . " c008800"
+            . " Range0-100",
+            percent
+        )
+
+        ; --------------------------------------------------------
+        ; КОЛИЧЕСТВО ПРОДАЖ
+        ; --------------------------------------------------------
+
+        hourlyGui.SetFont(
+            "s10 bold",
+            "Segoe UI"
+        )
+
+        hourlyGui.Add(
+            "Text",
+            "x" . (x + 270)
+            . " y" . y
+            . " w40 h22 Center c222222",
+            item.val
+        )
+    }
+
+    ; ============================================================
+    ; НИЖНИЙ БЛОК
+    ; ============================================================
+
+    bottomY := startY + (12 * rowH) + 10
+
+    hourlyGui.Add(
+        "Text",
+        "x25 y" . bottomY
+        . " w700 h1 BackgroundD9D9D9"
+    )
+
+    hourlyGui.SetFont(
+        "s10 bold",
+        "Segoe UI"
+    )
+
+    hourlyGui.Add(
+        "Text",
+        "x25 y" . (bottomY + 12)
+        . " w400 h25 c0066CC",
+        "Всего продаж сегодня: " . todaySales
+    )
+
+    ; ============================================================
+    ; КНОПКА ЗАКРЫТЬ
+    ; ============================================================
+
+    closeBtn := hourlyGui.Add(
+        "Button",
+        "x600 y" . (bottomY + 8)
+        . " w125 h30 Default",
+        "Закрыть"
+    )
+
+    closeBtn.OnEvent(
+        "Click",
+        (*) => hourlyGui.Destroy()
+    )
+
+    hourlyGui.OnEvent(
+        "Close",
+        (*) => hourlyGui.Destroy()
+    )
+
+    ; ============================================================
+    ; ПОКАЗЫВАЕМ ОКНО
+    ; ============================================================
+
+    hourlyGui.Show(
+        "w750 h" . (bottomY + 60)
+    )
 }
 
 
