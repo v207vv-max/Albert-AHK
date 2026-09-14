@@ -31,6 +31,28 @@ global sapF4Text := "Mijozni telefon raqamiga boglana olmadik"
 global callCount := 0
 global currentPhoneNum := "---"
 
+; ==============================================================================
+;                         СИСТЕМА АНАЛИТИКИ
+; ==============================================================================
+
+; Буферизированный журнал. Запись на диск идёт в фоне, чтобы хоткеи
+; не зависели от скорости файловой системы.
+global statsLogFile := A_ScriptDir . "\activity_log.txt"
+global statsLogBuffer := ""
+global statsLogPending := 0
+
+; Состояние текущего звонка.
+global statsCallActive := false
+global statsCallAnswered := false
+global statsCallPhone := ""
+global statsCallStartedTick := 0
+global statsCallAnsweredTick := 0
+global statsCallAttempt := 0
+global statsCallMode := 0
+
+; F9 использует Escape как отмену подтверждения.
+global statsIgnoreEsc := false
+
 ; Переменные для защиты от мерцания виджетов
 global widgetsVisible := false 
 global lastSipX := -1
@@ -38,6 +60,10 @@ global lastSipY := -1
 
 ToolTip("Режим: BITRIX (F12: SAP | F11: Режимы | End: Normal)")
 SetTimer(() => ToolTip(), -3000)
+
+; Статистика записывается в фоне, без I/O на каждом нажатии.
+SetTimer(StatsFlushLog, 1000)
+OnExit(StatsOnExit)
 ; ==============================================================================
 ;                         2. ИНТЕРФЕЙС, ВИДЖЕТЫ MICROSIP И ИНДИКАТОР РЕЖИМА
 ; ==============================================================================
@@ -238,6 +264,907 @@ ResetCallAttemptCounter()
     UpdateAllWidgetsDisplay()
 }
 
+; ==============================================================================
+;                         3.1. СИСТЕМА АНАЛИТИКИ
+; ==============================================================================
+
+StatsNormalizeKey(key)
+{
+    key := StrReplace(key, "$", "")
+    key := StrReplace(key, "~", "")
+    key := StrReplace(key, "*", "")
+    return key
+}
+
+
+; Добавляет событие в RAM-буфер.
+StatsQueueEvent(
+    key,
+    eventType,
+    phone := "",
+    duration := 0,
+    detail := ""
+)
+{
+    global statsLogBuffer, statsLogPending
+
+    key := StatsNormalizeKey(key)
+
+    phone := StrReplace(phone, "|", "")
+    detail := StrReplace(detail, "|", "")
+
+    timestamp := FormatTime(
+        A_Now,
+        "yyyy-MM-dd HH:mm:ss"
+    )
+
+    date := FormatTime(
+        A_Now,
+        "yyyy-MM-dd"
+    )
+
+    time := FormatTime(
+        A_Now,
+        "HH:mm:ss"
+    )
+
+    modeName := StatsGetModeName()
+
+    line :=
+        timestamp
+        . "|" . date
+        . "|" . time
+        . "|" . modeName
+        . "|" . key
+        . "|" . eventType
+        . "|" . phone
+        . "|" . duration
+        . "|" . detail
+        . "`n"
+
+    statsLogBuffer .= line
+    statsLogPending++
+
+    if (statsLogPending >= 20)
+        StatsFlushLog()
+}
+
+
+StatsFlushLog(*)
+{
+    global statsLogFile, statsLogBuffer, statsLogPending
+
+    if (statsLogBuffer == "")
+        return
+
+    try
+    {
+        FileAppend(
+            statsLogBuffer,
+            statsLogFile,
+            "UTF-8"
+        )
+
+        statsLogBuffer := ""
+        statsLogPending := 0
+    }
+    catch
+    {
+        ; Ошибка журнала не должна ломать рабочую часть скрипта.
+    }
+}
+
+
+StatsOnExit(exitReason, exitCode)
+{
+    StatsCloseCurrentCall()
+    StatsFlushLog()
+}
+
+
+StatsGetModeName()
+{
+    global currentMode
+
+    switch currentMode
+    {
+        case 0:
+            return "NORMAL"
+        case 1:
+            return "MICROSIP"
+        case 2:
+            return "BITRIX"
+        case 3:
+            return "SVERKA"
+        case 4:
+            return "TELEGRAM"
+        case 5:
+            return "SAP"
+        default:
+            return "UNKNOWN"
+    }
+}
+
+
+StatsTrackButton(key)
+{
+    global currentMode
+
+    if (currentMode == 0)
+        return
+
+    StatsQueueEvent(
+        key,
+        "BUTTON"
+    )
+}
+
+
+StatsSamePhone(a, b)
+{
+    if (
+        a == ""
+        || b == ""
+        || a == "---"
+        || b == "---"
+    )
+        return false
+
+    a := RegExReplace(a, "\D", "")
+    b := RegExReplace(b, "\D", "")
+
+    if (a == "" || b == "")
+        return false
+
+    if (StrLen(a) >= 9)
+        a := SubStr(a, -8)
+
+    if (StrLen(b) >= 9)
+        b := SubStr(b, -8)
+
+    return a == b
+}
+
+
+; Запускает новую попытку или считает F1/Redial повторной попыткой
+; того же самого клиента.
+StatsBeginOrRetryCall(
+    key := "UNKNOWN",
+    phone := ""
+)
+{
+    global statsCallActive
+    global statsCallPhone
+    global statsCallAttempt
+    global statsCallAnswered
+    global statsCallStartedTick
+    global statsCallAnsweredTick
+
+    ; Тот же номер = новая попытка. Предыдущая попытка получает
+    ; окончательный результат NO_ANSWER, после чего запускается новый CALL_STARTED.
+    if (
+        statsCallActive
+        && StatsSamePhone(
+            statsCallPhone,
+            phone
+        )
+    )
+    {
+        nextAttempt := statsCallAttempt + 1
+
+        StatsFinishCall(
+            "NO_ANSWER",
+            "RETRY"
+        )
+
+        ; Возвращаем номер и номер попытки для новой записи.
+        statsCallPhone := phone
+        statsCallActive := true
+        statsCallAnswered := false
+        statsCallStartedTick := A_TickCount
+        statsCallAnsweredTick := 0
+        statsCallAttempt := nextAttempt
+
+        StatsQueueEvent(
+            key,
+            "CALL_RETRY",
+            phone,
+            0,
+            "attempt=" . nextAttempt
+        )
+
+        StatsQueueEvent(
+            key,
+            "CALL_STARTED",
+            phone,
+            0,
+            "attempt=" . nextAttempt
+        )
+
+        return
+    }
+
+    StatsStartCall(
+        key,
+        phone
+    )
+}
+
+
+StatsStartCall(
+    key := "UNKNOWN",
+    phone := ""
+)
+{
+    global statsCallActive
+    global statsCallAnswered
+    global statsCallPhone
+    global statsCallStartedTick
+    global statsCallAnsweredTick
+    global statsCallAttempt
+    global statsCallMode
+    global currentMode
+
+    if (statsCallActive)
+    {
+        if (statsCallAnswered)
+        {
+            StatsFinishCall(
+                "ANSWERED",
+                "NEXT_CALL"
+            )
+        }
+        else
+        {
+            StatsFinishCall(
+                "NO_ANSWER",
+                "NEXT_CALL"
+            )
+        }
+    }
+
+    statsCallActive := true
+    statsCallAnswered := false
+    statsCallPhone := phone
+    statsCallStartedTick := A_TickCount
+    statsCallAnsweredTick := 0
+    statsCallAttempt := 1
+    statsCallMode := currentMode
+
+    StatsQueueEvent(
+        key,
+        "CALL_STARTED",
+        phone,
+        0,
+        "attempt=1"
+    )
+}
+
+
+StatsMarkClientAnswered(
+    key := "Telegram",
+    phone := ""
+)
+{
+    global statsCallActive
+    global statsCallAnswered
+    global statsCallPhone
+    global statsCallStartedTick
+    global statsCallAnsweredTick
+
+    if (!statsCallActive)
+        return false
+
+    if (
+        phone != ""
+        && statsCallPhone != ""
+        && statsCallPhone != "---"
+        && !StatsSamePhone(
+            statsCallPhone,
+            phone
+        )
+    )
+        return false
+
+    if (statsCallAnswered)
+        return true
+
+    statsCallAnswered := true
+    statsCallAnsweredTick := A_TickCount
+
+    responseSeconds := Round(
+        (statsCallAnsweredTick - statsCallStartedTick) / 1000
+    )
+
+    StatsQueueEvent(
+        key,
+        "CLIENT_ANSWERED",
+        statsCallPhone,
+        responseSeconds
+    )
+
+    return true
+}
+
+
+StatsFinishCall(
+    result := "",
+    detail := ""
+)
+{
+    global statsCallActive
+    global statsCallAnswered
+    global statsCallPhone
+    global statsCallStartedTick
+    global statsCallAnsweredTick
+    global statsCallAttempt
+    global statsCallMode
+
+    if (!statsCallActive)
+        return
+
+    durationSeconds := Round(
+        (A_TickCount - statsCallStartedTick) / 1000
+    )
+
+    if (result == "")
+    {
+        if (statsCallAnswered)
+            result := "ANSWERED"
+        else
+            result := "NO_ANSWER"
+    }
+
+    detailText :=
+        result
+        . ";attempt="
+        . statsCallAttempt
+
+    if (detail != "")
+        detailText .= ";" . detail
+
+    StatsQueueEvent(
+        "CALL",
+        "CALL_RESULT",
+        statsCallPhone,
+        durationSeconds,
+        detailText
+    )
+
+    statsCallActive := false
+    statsCallAnswered := false
+    statsCallPhone := ""
+    statsCallStartedTick := 0
+    statsCallAnsweredTick := 0
+    statsCallAttempt := 0
+    statsCallMode := 0
+}
+
+
+StatsCloseCurrentCall()
+{
+    global statsCallActive, statsCallAnswered
+
+    if (!statsCallActive)
+        return
+
+    if (statsCallAnswered)
+        StatsFinishCall("ANSWERED", "MODE_EXIT")
+    else
+        StatsFinishCall("NO_ANSWER", "MODE_EXIT")
+}
+
+
+StatsValidDate(dateText)
+{
+    return RegExMatch(
+        dateText,
+        "^\d{4}-\d{2}-\d{2}$"
+    )
+}
+
+
+StatsDateAdd(dateText, days)
+{
+    if !StatsValidDate(dateText)
+        return dateText
+
+    raw := StrReplace(
+        dateText,
+        "-",
+        ""
+    ) . "000000"
+
+    try
+    {
+        return FormatTime(
+            DateAdd(
+                raw,
+                days,
+                "Days"
+            ),
+            "yyyy-MM-dd"
+        )
+    }
+    catch
+    {
+        return dateText
+    }
+}
+
+
+StatsNormalizePhone(phone)
+{
+    clean := RegExReplace(
+        phone,
+        "\D",
+        ""
+    )
+
+    if (StrLen(clean) >= 9)
+        return SubStr(clean, -8)
+
+    return clean
+}
+
+
+BuildDailyAnalytics(selectedDate)
+{
+    global statsLogFile, iniFile
+
+    stats := {
+        calls: 0,
+        answered: 0,
+        noAnswer: 0,
+        sales: 0,
+        cancelledSales: 0,
+        retries: 0,
+
+        totalCallSeconds: 0,
+        totalResponseSeconds: 0,
+        idleSeconds: 0,
+        activeSpanSeconds: 0,
+        averageInterCallSeconds: 0,
+
+        buttons: Map(),
+        uniqueClients: Map(),
+        repeatClients: Map(),
+        answeredClients: Map(),
+
+        hourlyCalls: [],
+        hourlyAnswered: [],
+        hourlySales: [],
+
+        firstAction: "",
+        lastAction: "",
+
+        busiestHour: -1,
+        busiestHourCount: 0,
+
+        bestSalesHour: -1,
+        bestSalesHourCount: 0
+    }
+
+    Loop 24
+    {
+        stats.hourlyCalls.Push(0)
+        stats.hourlyAnswered.Push(0)
+        stats.hourlySales.Push(0)
+    }
+
+    ; Сбрасываем свежий буфер перед чтением журнала.
+    StatsFlushLog()
+
+    ; Для продаж сохраняем совместимость со старым DailySales.
+    try
+    {
+        stats.sales := Integer(
+            IniRead(
+                iniFile,
+                "DailySales",
+                selectedDate,
+                0
+            )
+        )
+    }
+    catch
+    {
+        stats.sales := 0
+    }
+
+    logText := ""
+
+    try
+    {
+        if FileExist(statsLogFile)
+            logText := FileRead(
+                statsLogFile,
+                "UTF-8"
+            )
+    }
+    catch
+    {
+        return stats
+    }
+
+    if (logText == "")
+        return stats
+
+    lastActionTimestamp := ""
+    lastCallTimestamp := ""
+
+    interCallTotal := 0
+    interCallCount := 0
+
+    for line in StrSplit(
+        logText,
+        "`n",
+        "`r"
+    )
+    {
+        if (Trim(line) == "")
+            continue
+
+        parts := StrSplit(
+            line,
+            "|"
+        )
+
+        if (parts.Length < 9)
+            continue
+
+        timestamp := parts[1]
+        date := parts[2]
+        time := parts[3]
+        key := parts[5]
+        eventType := parts[6]
+        phone := parts[7]
+        durationText := parts[8]
+        detail := parts[9]
+
+        if (date != selectedDate)
+            continue
+
+        if (stats.firstAction == "")
+            stats.firstAction := timestamp
+
+        stats.lastAction := timestamp
+
+        ; Простой: больше 5 минут без зарегистрированных рабочих действий.
+        if (lastActionTimestamp != "")
+        {
+            try
+            {
+                gap := DateDiff(
+                    timestamp,
+                    lastActionTimestamp,
+                    "Seconds"
+                )
+
+                if (gap > 300)
+                    stats.idleSeconds += gap
+            }
+            catch
+            {
+            }
+        }
+
+        lastActionTimestamp := timestamp
+
+        try
+        {
+            hourIndex := Integer(
+                SubStr(time, 1, 2)
+            ) + 1
+        }
+        catch
+        {
+            hourIndex := 1
+        }
+
+        if (hourIndex < 1 || hourIndex > 24)
+            hourIndex := 1
+
+        ; --------------------------------------------------------
+        ; КНОПКИ
+        ; --------------------------------------------------------
+
+        if (eventType == "BUTTON")
+        {
+            if !stats.buttons.Has(key)
+                stats.buttons[key] := 0
+
+            stats.buttons[key]++
+        }
+
+        ; --------------------------------------------------------
+        ; ЗВОНОК
+        ; --------------------------------------------------------
+
+        else if (eventType == "CALL_STARTED")
+        {
+            stats.calls++
+            stats.hourlyCalls[hourIndex]++
+
+            if (lastCallTimestamp != "")
+            {
+                try
+                {
+                    gap := DateDiff(
+                        timestamp,
+                        lastCallTimestamp,
+                        "Seconds"
+                    )
+
+                    if (gap >= 0)
+                    {
+                        interCallTotal += gap
+                        interCallCount++
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            lastCallTimestamp := timestamp
+
+            normalizedPhone :=
+                StatsNormalizePhone(phone)
+
+            if (normalizedPhone != "")
+            {
+                if !stats.uniqueClients.Has(
+                    normalizedPhone
+                )
+                    stats.uniqueClients[normalizedPhone] := 0
+
+                stats.uniqueClients[normalizedPhone]++
+
+                if (
+                    stats.uniqueClients[normalizedPhone] > 1
+                )
+                {
+                    stats.repeatClients[
+                        normalizedPhone
+                    ] := stats.uniqueClients[
+                        normalizedPhone
+                    ]
+                }
+            }
+        }
+
+        ; --------------------------------------------------------
+        ; ОТВЕТ
+        ; --------------------------------------------------------
+
+        else if (eventType == "CLIENT_ANSWERED")
+        {
+            stats.answered++
+            stats.hourlyAnswered[hourIndex]++
+
+            try
+            {
+                stats.totalResponseSeconds +=
+                    Integer(durationText)
+            }
+            catch
+            {
+            }
+
+            normalizedPhone :=
+                StatsNormalizePhone(phone)
+
+            if (normalizedPhone != "")
+                stats.answeredClients[
+                    normalizedPhone
+                ] := 1
+        }
+
+        ; --------------------------------------------------------
+        ; ПОВТОР
+        ; --------------------------------------------------------
+
+        else if (eventType == "CALL_RETRY")
+        {
+            stats.retries++
+        }
+
+        ; --------------------------------------------------------
+        ; РЕЗУЛЬТАТ
+        ; --------------------------------------------------------
+
+        else if (eventType == "CALL_RESULT")
+        {
+            try
+            {
+                stats.totalCallSeconds +=
+                    Integer(durationText)
+            }
+            catch
+            {
+            }
+
+            if InStr(
+                detail,
+                "NO_ANSWER"
+            )
+                stats.noAnswer++
+
+            if InStr(
+                detail,
+                "SALE"
+            )
+                stats.hourlySales[hourIndex]++
+        }
+
+        ; --------------------------------------------------------
+        ; ОТМЕНА ПРОДАЖИ
+        ; --------------------------------------------------------
+
+        else if (eventType == "SALE_CANCELLED")
+        {
+            stats.cancelledSales++
+        }
+    }
+
+    Loop 24
+    {
+        calls := stats.hourlyCalls[A_Index]
+        sales := stats.hourlySales[A_Index]
+
+        if (calls > stats.busiestHourCount)
+        {
+            stats.busiestHourCount := calls
+            stats.busiestHour := A_Index - 1
+        }
+
+        if (sales > stats.bestSalesHourCount)
+        {
+            stats.bestSalesHourCount := sales
+            stats.bestSalesHour := A_Index - 1
+        }
+    }
+
+    if (interCallCount > 0)
+    {
+        stats.averageInterCallSeconds :=
+            Round(
+                interCallTotal / interCallCount
+            )
+    }
+
+    if (
+        stats.firstAction != ""
+        && stats.lastAction != ""
+    )
+    {
+        try
+        {
+            stats.activeSpanSeconds :=
+                DateDiff(
+                    stats.lastAction,
+                    stats.firstAction,
+                    "Seconds"
+                )
+        }
+        catch
+        {
+        }
+    }
+
+    return stats
+}
+
+
+StatsFormatDuration(seconds)
+{
+    try
+    {
+        seconds := Integer(seconds)
+    }
+    catch
+    {
+        seconds := 0
+    }
+
+    if (seconds < 0)
+        seconds := 0
+
+    hours := Floor(seconds / 3600)
+    minutes := Floor(
+        Mod(seconds, 3600) / 60
+    )
+    secs := Mod(seconds, 60)
+
+    if (hours > 0)
+    {
+        return Format(
+            "{:02}:{:02}:{:02}",
+            hours,
+            minutes,
+            secs
+        )
+    }
+
+    return Format(
+        "{:02}:{:02}",
+        minutes,
+        secs
+    )
+}
+
+
+StatsGetTopButtons(buttons, limit := 8)
+{
+    result := []
+
+    for key, value in buttons
+    {
+        inserted := false
+
+        Loop result.Length
+        {
+            idx := A_Index
+
+            if (value > result[idx].value)
+            {
+                result.InsertAt(
+                    idx,
+                    {
+                        key: key,
+                        value: value
+                    }
+                )
+
+                inserted := true
+                break
+            }
+        }
+
+        if (!inserted)
+        {
+            result.Push({
+                key: key,
+                value: value
+            })
+        }
+
+        if (result.Length > limit)
+            result.Pop()
+    }
+
+    return result
+}
+
+
+; Escape остаётся обычным Escape благодаря "~".
+; При активном неподтверждённом звонке он фиксирует NO_ANSWER.
+~Esc::
+{
+    global currentMode, statsIgnoreEsc
+    global statsCallActive, statsCallAnswered
+
+    if (currentMode != 0)
+        StatsTrackButton("Esc")
+
+    if (statsIgnoreEsc)
+        return
+
+    if (
+        currentMode != 0
+        && statsCallActive
+        && !statsCallAnswered
+    )
+    {
+        StatsFinishCall(
+            "NO_ANSWER",
+            "ESC"
+        )
+    }
+}
+
+
 ; Извлекает из произвольного текста только цифры и проверяет длину номера.
 ; При add998=true возвращает номер в международном виде 998XXXXXXXXX;
 ; при false возвращает 9 цифр для ввода в MicroSIP. Некорректные данные дают Error.
@@ -357,6 +1284,11 @@ HandleSipCallFlow(statusText)
     Send("{Ctrl Down}a{Ctrl Up}")
     Sleep(30)
     Send("{Ctrl Down}v{Ctrl Up}{Enter}")
+
+    StatsBeginOrRetryCall(
+        "HandleSipCallFlow",
+        currentPhoneNum
+    )
 }
 
 ; Режим SAP, F2: копирует номер, который пользователь заранее выделил двойным
@@ -408,6 +1340,11 @@ CallSelectedPhoneInSapMode()
     Send("{Ctrl Down}v{Ctrl Up}{Enter}")
     Sleep(80)
     A_Clipboard := savedClipboard
+
+    StatsBeginOrRetryCall(
+        "F2",
+        currentPhoneNum
+    )
 }
 
 ; Режим SAP, F3/F4: печатает переданный текст в активное поле без использования
@@ -448,6 +1385,11 @@ RedialCurrentSapPhone()
     Sleep(80)
     A_Clipboard := savedClipboard
 
+    StatsBeginOrRetryCall(
+        "F1",
+        currentPhoneNum
+    )
+
     callCount++
     UpdateAllWidgetsDisplay()
 }
@@ -462,8 +1404,10 @@ RedialCurrentSapPhone()
 ~End::
 {
     global currentMode
+    StatsTrackButton("End")
     if (currentMode != 0)
     {
+        StatsCloseCurrentCall()
         currentMode := 0
         UpdateModeIndicator()
         ToolTip("РЕЖИМ: NORMAL (Скрипты отключены)")
@@ -475,6 +1419,7 @@ RedialCurrentSapPhone()
 $F11::
 {
     global currentMode, lastWorkMode
+    StatsTrackButton("F11")
 
     if (currentMode != 2 && currentMode != 3)
         currentMode := 2
@@ -484,6 +1429,15 @@ $F11::
         currentMode := 2
 
     lastWorkMode := currentMode
+
+    StatsQueueEvent(
+        "F11",
+        "MODE_CHANGED",
+        "",
+        0,
+        "mode=" . StatsGetModeName()
+    )
+
     UpdateModeIndicator()
     ToolTip("РЕЖИМ: " . (currentMode == 2 ? "BITRIX" : "SVERKA"))
     SetTimer(() => ToolTip(), -1200)
@@ -494,6 +1448,7 @@ $F11::
 $F12::
 {
     global currentMode, lastWorkMode
+    StatsTrackButton("F12")
 
     ; Если был любой другой режим — сначала включается SAP.
     if (currentMode != 5 && currentMode != 4 && currentMode != 1)
@@ -506,6 +1461,15 @@ $F12::
         currentMode := 5
 
     lastWorkMode := currentMode
+
+    StatsQueueEvent(
+        "F12",
+        "MODE_CHANGED",
+        "",
+        0,
+        "mode=" . StatsGetModeName()
+    )
+
     UpdateModeIndicator()
 
     if (currentMode == 5)
@@ -523,6 +1487,7 @@ $F12::
 $F10::
 {
     global statusF2, statusF3, statusF4, statusSverkaF2, statusSverkaF4
+    StatsTrackButton("F10")
     
     settingsGui := Gui("+AlwaysOnTop", "Настройка статусов")
     settingsGui.SetFont("s10", "Segoe UI")
@@ -574,6 +1539,7 @@ $F10::
 $F1::
 {
     global callCount, currentPhoneNum, currentMode
+    StatsTrackButton("F1")
     if (currentMode == 0)
     {
         Send("{F1}")
@@ -607,12 +1573,19 @@ $F1::
 
         callCount++
         UpdateAllWidgetsDisplay()
-
+        Sleep(200)
+        Send("#{1}")
+        Sleep(200)
         Send("{Enter}")
-        Sleep(30)
+        Sleep(80)
         Send("{Up}")
-        Sleep(30)
+        Sleep(80)
         Send("{Enter}")
+        Sleep(80)
+        StatsBeginOrRetryCall(
+            "F1",
+            currentPhoneNum
+        )
     }
 }
 
@@ -621,6 +1594,7 @@ $F1::
 $F2::
 {
     global currentPhoneNum, callCount, currentMode
+    StatsTrackButton("F2")
     if (currentMode == 0)
     {
         Send("{F2}")
@@ -705,6 +1679,11 @@ $F2::
         Send("{Ctrl Down}a{Ctrl Up}")
         Sleep(30)
         Send("{Ctrl Down}v{Ctrl Up}{Enter}")
+
+        StatsBeginOrRetryCall(
+            "F2",
+            currentPhoneNum
+        )
     }
     else if (currentMode == 4)
     {
@@ -716,6 +1695,7 @@ $F2::
 $F3::
 {
     global currentPhoneNum, callCount, currentMode, sapF3Text, statusF3
+    StatsTrackButton("F3")
 
     if (currentMode == 0)
     {
@@ -793,6 +1773,11 @@ $F3::
         Send("{Ctrl Down}a{Ctrl Up}")
         Sleep(30)
         Send("{Ctrl Down}v{Ctrl Up}{Enter}")
+
+        StatsBeginOrRetryCall(
+            "F3",
+            currentPhoneNum
+        )
     }
 
     ; Telegram: прежний поиск следующего номера.
@@ -824,6 +1809,7 @@ $F3::
 $F4::
 {
     global currentPhoneNum, callCount, currentMode, sapF4Text
+    StatsTrackButton("F4")
     if (currentMode == 0)
     {
         Send("{F4}")
@@ -866,7 +1852,12 @@ $F4::
         Send("{Ctrl Down}a{Ctrl Up}")
         Sleep(30)
         Send("{Ctrl Down}v{Ctrl Up}{Enter}")
-        
+
+        StatsBeginOrRetryCall(
+            "F4",
+            currentPhoneNum
+        )
+
         callCount := 1
         UpdateAllWidgetsDisplay()
     }
@@ -907,6 +1898,11 @@ $F4::
         Send("{Ctrl Down}a{Ctrl Up}")
         Sleep(30)
         Send("{Ctrl Down}v{Ctrl Up}{Enter}")
+
+        StatsBeginOrRetryCall(
+            "F4",
+            currentPhoneNum
+        )
     }
     else if (currentMode == 4)
     {
@@ -938,6 +1934,7 @@ $F4::
 ; F6 закрывает окно MicroSIP, если оно запущено, и сообщает результат пользователю.
 $F6::
 {
+    StatsTrackButton("F6")
     if (currentMode == 0)
     {
         Send("{F6}")
@@ -961,6 +1958,7 @@ $F6::
 $F7::
 {
     global currentPhoneNum
+    StatsTrackButton("F7")
     if (currentMode == 0)
     {
         Send("{F7}")
@@ -1013,6 +2011,7 @@ $F7::
 ; F8 вставляет данные в режиме сверки или очищает поле поиска Telegram.
 $F8::
 {
+    StatsTrackButton("F8")
     if (currentMode == 0)
     {
         Send("{F8}")
@@ -1038,6 +2037,8 @@ $F8::
 ; F9 после явного подтверждения закрывает рабочие программы для подготовки к сверке.
 $F9::
 {
+    global statsIgnoreEsc
+    StatsTrackButton("F9")
     if (currentMode == 0)
     {
         Send("{F9}")
@@ -1046,9 +2047,12 @@ $F9::
 
     ToolTip("⚠️ ЗАКРЫТЬ лишние программы для сверки?`n[ ENTER ] — Закрыть | [ ESC / жди 3с ] — Отмена")
     
+    statsIgnoreEsc := true
     ih := InputHook("L1 T3", "{Enter}{Escape}")
     ih.Start()
     ih.Wait()
+
+    statsIgnoreEsc := false
 
     ToolTip()
 
@@ -1099,6 +2103,7 @@ $F9::
 $Volume_Mute::
 {
     global currentMode, todayKey, todaySales, iniFile
+    StatsTrackButton("Volume_Mute")
 
     if (currentMode == 0)
     {
@@ -1135,6 +2140,11 @@ $Volume_Mute::
         iniFile,
         "DailySales",
         todayKey
+    )
+
+    StatsFinishCall(
+        "SALE",
+        "Volume_Mute"
     )
 
     ; ============================================================
@@ -1180,6 +2190,7 @@ $Volume_Mute::
 $PrintScreen::
 {
     global currentMode, todayKey, todaySales, iniFile
+    StatsTrackButton("PrintScreen")
 
     if (currentMode == 0)
     {
@@ -1215,6 +2226,44 @@ $Launch_Media::
 $Launch_App1::
 $Launch_App2::
 {
+    StatsTrackButton(
+        A_ThisHotkey
+    )
+
+    if (currentMode == 3)
+    {
+        ; SVERKA → сообщаем ZIK о результате KOCHADAN
+
+        try
+        {
+            http := ComObject("WinHttp.WinHttpRequest.5.1")
+
+            http.Open(
+                "POST",
+                "http://127.0.0.1:8765/event",
+                false
+            )
+
+            http.SetRequestHeader(
+                "Content-Type",
+                "application/json"
+            )
+
+            http.Send(
+                '{"event":"kochadan"}'
+            )
+        }
+        catch
+        {
+            ToolTip("ZIK недоступен")
+            SetTimer(() => ToolTip(), -1500)
+        }
+
+        return
+    }
+
+    ; ===== ТВОЙ СТАРЫЙ КОД =====
+
     rawText := A_Clipboard
     cleanNum := RegExReplace(rawText, "\D", "")
 
@@ -1233,9 +2282,20 @@ $Launch_App2::
     else
         return
 
+    StatsMarkClientAnswered(
+        A_ThisHotkey,
+        cleanNum
+    )
+
     Sleep(80)
+    Send("#{2}")
+    Sleep(100)
     Send("{Escape 3}")
     Sleep(80)
+    Send("^f")
+    Sleep(100)
+    Send("{Escape}")
+    Sleep(100)
     Send("{Down 2}{Enter}")
     Sleep(250)
     Send("{Down}")
@@ -1244,10 +2304,10 @@ $Launch_App2::
     Sleep(200)
     Send("^#{Right}")
 }
-
 ; Browser Home закрывает текущую вкладку и переключает виртуальный рабочий стол влево.
 $Browser_Home::
 {
+    StatsTrackButton("Browser_Home")
     Send("^w")
     Sleep(50)
     Send("^#{Left}")
@@ -1256,12 +2316,14 @@ $Browser_Home::
 ; Volume Down переключает Windows на рабочий стол слева.
 $Volume_Down::
 {
+    StatsTrackButton("Volume_Down")
     Send("^#{Left}")
 }
 
 ; Volume Up переключает Windows на рабочий стол справа.
 $Volume_Up::
 {
+    StatsTrackButton("Volume_Up")
     Send("^#{Right}")
 }
 ; ================================================================
@@ -1271,6 +2333,7 @@ $Volume_Up::
 $Insert::
 {
     global currentMode
+    StatsTrackButton("Insert")
 
     if (currentMode == 0)
     {
@@ -1516,12 +2579,14 @@ ShowDailyStats()
 }
 
 ; ================================================================
-; HOME — ПОЧАСОВАЯ СТАТИСТИКА ЗА СЕГОДНЯ
+; HOME — ПОЛНАЯ АНАЛИТИКА ВЫБРАННОГО ДНЯ
 ; ================================================================
 
 $Home::
 {
     global currentMode
+
+    StatsTrackButton("Home")
 
     if (currentMode == 0)
     {
@@ -1533,309 +2598,626 @@ $Home::
 }
 
 
-; ================================================================
-; ЗАПИСЬ ЗВОНКА В ПОЧАСОВУЮ СТАТИСТИКУ
-; ================================================================
-
-RecordCallAttempt()
-{
-    global iniFile
-
-    currentDay := FormatTime(
-        A_Now,
-        "yyyy-MM-dd"
-    )
-
-    currentHour := FormatTime(
-        A_Now,
-        "HH"
-    )
-
-    hourKey := currentDay . "_" . currentHour
-
-    callCountHour := IniRead(
-        iniFile,
-        "HourlyCalls",
-        hourKey,
-        0
-    )
-
-    try
-    {
-        callCountHour := Integer(callCountHour)
-    }
-    catch
-    {
-        callCountHour := 0
-    }
-
-    callCountHour++
-
-    IniWrite(
-        callCountHour,
-        iniFile,
-        "HourlyCalls",
-        hourKey
-    )
-}
-
-
-
 ShowHourlyStats()
 {
-    global iniFile, todayKey, todaySales
+    global todayKey
 
-    ; ============================================================
-    ; СОБИРАЕМ СТАТИСТИКУ ЗА КАЖДЫЙ ЧАС
-    ; ============================================================
+    selectedDate := todayKey
 
-    hourlyData := []
-
-    maxVal := 1
-
-    Loop 24
-    {
-        hour := A_Index - 1
-
-        hourText := Format("{:02}", hour)
-
-        hourKey := todayKey . "_" . hourText
-
-        value := IniRead(
-            iniFile,
-            "HourlySales",
-            hourKey,
-            0
-        )
-
-        try
-        {
-            value := Integer(value)
-        }
-        catch
-        {
-            value := 0
-        }
-
-        hourlyData.Push({
-            hour: hour,
-            val: value
-        })
-
-        if (value > maxVal)
-            maxVal := value
-    }
-
-    ; ============================================================
-    ; СОЗДАЁМ ОКНО
-    ; ============================================================
-
-    hourlyGui := Gui(
+    statsGui := Gui(
         "+AlwaysOnTop +Border",
-        "Продажи по часам"
+        "Аналитика рабочего дня"
     )
 
-    hourlyGui.BackColor := "FFFFFF"
+    statsGui.BackColor := "FFFFFF"
+    statsGui.MarginX := 25
+    statsGui.MarginY := 20
 
-    hourlyGui.MarginX := 25
-    hourlyGui.MarginY := 20
-
-    ; ============================================================
-    ; ЗАГОЛОВОК
-    ; ============================================================
-
-    hourlyGui.SetFont(
+    statsGui.SetFont(
         "s16 bold",
         "Segoe UI"
     )
 
-    hourlyGui.Add(
+    statsGui.Add(
         "Text",
-        "x25 y20 w700 h30 Center c0066CC",
-        "ПРОДАЖИ ПО ЧАСАМ"
+        "x25 y18 w820 h32 Center c0066CC",
+        "АНАЛИТИКА РАБОЧЕГО ДНЯ"
     )
 
-    hourlyGui.SetFont(
+    statsGui.SetFont(
         "s10",
         "Segoe UI"
     )
 
-    hourlyGui.Add(
+    statsGui.Add(
         "Text",
-        "x25 y52 w700 h22 Center c777777",
-        todayKey . "    •    Всего продаж: " . todaySales
+        "x25 y52 w820 h22 Center c777777",
+        "Выбери дату и нажми «Показать»"
     )
 
-    ; Разделитель
-
-    hourlyGui.Add(
+    statsGui.Add(
         "Text",
-        "x25 y78 w700 h1 BackgroundD9D9D9"
+        "x25 y87 w45 h25",
+        "Дата:"
     )
 
-    ; ============================================================
-    ; НАСТРОЙКИ ТАБЛИЦЫ
-    ; ============================================================
+    dateEdit := statsGui.Add(
+        "Edit",
+        "x70 y84 w120 h26",
+        selectedDate
+    )
 
-    leftX := 25
-    rightX := 385
+    showBtn := statsGui.Add(
+        "Button",
+        "x200 y83 w100 h28",
+        "Показать"
+    )
 
-    startY := 100
-    rowH := 40
+    prevBtn := statsGui.Add(
+        "Button",
+        "x310 y83 w85 h28",
+        "← Вчера"
+    )
 
-    ; ============================================================
-    ; 24 ЧАСА → 2 КОЛОНКИ ПО 12
-    ; ============================================================
+    currentBtn := statsGui.Add(
+        "Button",
+        "x405 y83 w95 h28",
+        "Сегодня"
+    )
+
+    nextBtn := statsGui.Add(
+        "Button",
+        "x510 y83 w85 h28",
+        "Завтра →"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x25 y122 w820 h1 BackgroundD9D9D9"
+    )
+
+    cardY := 138
+
+    statsGui.SetFont(
+        "s8",
+        "Segoe UI"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x25 y" . cardY . " w150 h18 Center c777777",
+        "ЗВОНКИ"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x185 y" . cardY . " w150 h18 Center c777777",
+        "ОТВЕТИЛИ"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x345 y" . cardY . " w150 h18 Center c777777",
+        "КЛИЕНТЫ"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x505 y" . cardY . " w150 h18 Center c777777",
+        "ПРОДАЖИ"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x665 y" . cardY . " w180 h18 Center c777777",
+        "ПИК ЗВОНКОВ"
+    )
+
+    statsGui.SetFont(
+        "s18 bold",
+        "Segoe UI"
+    )
+
+    callsValue := statsGui.Add(
+        "Text",
+        "x25 y" . (cardY + 18) . " w150 h34 Center c0066CC",
+        "0"
+    )
+
+    answeredValue := statsGui.Add(
+        "Text",
+        "x185 y" . (cardY + 18) . " w150 h34 Center c008800",
+        "0"
+    )
+
+    uniqueValue := statsGui.Add(
+        "Text",
+        "x345 y" . (cardY + 18) . " w150 h34 Center c444444",
+        "0"
+    )
+
+    salesValue := statsGui.Add(
+        "Text",
+        "x505 y" . (cardY + 18) . " w150 h34 Center cCC6600",
+        "0"
+    )
+
+    peakValue := statsGui.Add(
+        "Text",
+        "x665 y" . (cardY + 18) . " w180 h34 Center cCC6600",
+        "—"
+    )
+
+    statsGui.SetFont(
+        "s8",
+        "Segoe UI"
+    )
+
+    answerRateValue := statsGui.Add(
+        "Text",
+        "x185 y" . (cardY + 53) . " w150 h18 Center c777777",
+        "0.0% ответов"
+    )
+
+    conversionValue := statsGui.Add(
+        "Text",
+        "x505 y" . (cardY + 53) . " w150 h18 Center c777777",
+        "0.0% конверсия"
+    )
+
+    graphTop := 240
+
+    statsGui.SetFont(
+        "s10 bold",
+        "Segoe UI"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x25 y" . graphTop . " w400 h22 c444444",
+        "ЗВОНКИ ПО ЧАСАМ"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x445 y" . graphTop . " w400 h22 c444444",
+        "ВТОРАЯ ПОЛОВИНА ДНЯ"
+    )
+
+    statsGui.SetFont(
+        "s8",
+        "Segoe UI"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x25 y" . (graphTop + 25) . " w400 h18 c999999",
+        "Количество начатых звонков"
+    )
+
+    statsGui.Add(
+        "Text",
+        "x445 y" . (graphTop + 25) . " w400 h18 c999999",
+        "12:00–00:00 • количество звонков"
+    )
+
+    graphY := graphTop + 50
+    rowH := 24
+    hourRows := []
 
     Loop 24
     {
         idx := A_Index
 
-        item := hourlyData[idx]
-
-        ; --------------------------------------------------------
-        ; Определяем колонку
-        ; --------------------------------------------------------
-
         if (idx <= 12)
         {
-            x := leftX
+            x := 25
             row := idx - 1
         }
         else
         {
-            x := rightX
+            x := 445
             row := idx - 13
         }
 
-        y := startY + (row * rowH)
-
-        ; --------------------------------------------------------
-        ; Время
-        ; --------------------------------------------------------
+        y := graphY + row * rowH
 
         hourStart := Format(
             "{:02}:00",
-            item.hour
-        )
-
-        nextHour := Mod(
-            item.hour + 1,
-            24
+            idx - 1
         )
 
         hourEnd := Format(
             "{:02}:00",
-            nextHour
+            Mod(idx, 24)
         )
 
-        hourlyGui.SetFont(
-            "s9",
+        statsGui.SetFont(
+            "s8",
             "Segoe UI"
         )
 
-        hourlyGui.Add(
+        statsGui.Add(
             "Text",
-            "x" . x
-            . " y" . y
-            . " w75 h22 c444444",
+            "x" . x . " y" . y . " w65 h19 c555555",
             hourStart . "–" . hourEnd
         )
 
-        ; --------------------------------------------------------
-        ; ПРОГРЕСС-БАР
-        ; --------------------------------------------------------
-
-        percent := 0
-
-        if (item.val > 0)
-            percent := (item.val / maxVal) * 100
-
-        hourlyGui.Add(
+        callBar := statsGui.Add(
             "Progress",
-            "x" . (x + 80)
+            "x" . (x + 70)
             . " y" . y
-            . " w180 h20"
-            . " BackgroundE8E8E8"
-            . " c008800"
+            . " w190 h17"
+            . " BackgroundEEEEEE"
+            . " c0066CC"
             . " Range0-100",
-            percent
+            0
         )
 
-        ; --------------------------------------------------------
-        ; КОЛИЧЕСТВО ПРОДАЖ
-        ; --------------------------------------------------------
-
-        hourlyGui.SetFont(
-            "s10 bold",
-            "Segoe UI"
-        )
-
-        hourlyGui.Add(
+        callCountText := statsGui.Add(
             "Text",
-            "x" . (x + 270)
+            "x" . (x + 265)
             . " y" . y
-            . " w40 h22 Center c222222",
-            item.val
+            . " w40 h19 Center c222222",
+            "0"
         )
+
+        hourRows.Push({
+            progress: callBar,
+            count: callCountText
+        })
     }
 
-    ; ============================================================
-    ; НИЖНИЙ БЛОК
-    ; ============================================================
+    bottomY := graphY + 12 * rowH + 8
 
-    bottomY := startY + (12 * rowH) + 10
-
-    hourlyGui.Add(
+    statsGui.Add(
         "Text",
         "x25 y" . bottomY
-        . " w700 h1 BackgroundD9D9D9"
+        . " w820 h1 BackgroundD9D9D9"
     )
 
-    hourlyGui.SetFont(
+    statsGui.SetFont(
+        "s9",
+        "Segoe UI"
+    )
+
+    workInfo := statsGui.Add(
+        "Text",
+        "x25 y" . (bottomY + 10)
+        . " w400 h24 c555555",
+        "Работа: —"
+    )
+
+    intervalInfo := statsGui.Add(
+        "Text",
+        "x445 y" . (bottomY + 10)
+        . " w400 h24 c555555",
+        "Средний интервал: —"
+    )
+
+    retryInfo := statsGui.Add(
+        "Text",
+        "x25 y" . (bottomY + 35)
+        . " w400 h24 c555555",
+        "Повторных попыток: 0"
+    )
+
+    bestSalesInfo := statsGui.Add(
+        "Text",
+        "x445 y" . (bottomY + 35)
+        . " w400 h24 c555555",
+        "Лучший час по продажам: —"
+    )
+
+    noAnswerInfo := statsGui.Add(
+        "Text",
+        "x25 y" . (bottomY + 60)
+        . " w400 h24 c555555",
+        "Не ответили: 0"
+    )
+
+    idleInfo := statsGui.Add(
+        "Text",
+        "x445 y" . (bottomY + 60)
+        . " w400 h24 c555555",
+        "Простои > 5 мин: 00:00"
+    )
+
+    buttonsTitleY := bottomY + 95
+
+    statsGui.SetFont(
         "s10 bold",
         "Segoe UI"
     )
 
-    hourlyGui.Add(
+    statsGui.Add(
         "Text",
-        "x25 y" . (bottomY + 12)
-        . " w400 h25 c0066CC",
-        "Всего продаж сегодня: " . todaySales
+        "x25 y" . buttonsTitleY . " w820 h22 c444444",
+        "САМЫЕ ЧАСТЫЕ РАБОЧИЕ ДЕЙСТВИЯ"
     )
 
-    ; ============================================================
-    ; КНОПКА ЗАКРЫТЬ
-    ; ============================================================
+    buttonRows := []
 
-    closeBtn := hourlyGui.Add(
+    Loop 8
+    {
+        y := buttonsTitleY + 26 + (A_Index - 1) * 20
+
+        statsGui.SetFont(
+            "s8",
+            "Segoe UI"
+        )
+
+        keyText := statsGui.Add(
+            "Text",
+            "x25 y" . y . " w150 h18 c333333",
+            ""
+        )
+
+        countText := statsGui.Add(
+            "Text",
+            "x175 y" . y . " w70 h18 c777777",
+            ""
+        )
+
+        buttonRows.Push({
+            key: keyText,
+            count: countText
+        })
+    }
+
+    closeBtn := statsGui.Add(
         "Button",
-        "x600 y" . (bottomY + 8)
+        "x720 y" . (buttonsTitleY + 175)
         . " w125 h30 Default",
         "Закрыть"
     )
 
+    RefreshAnalytics()
+    {
+        selected := Trim(
+            dateEdit.Value
+        )
+
+        if !StatsValidDate(selected)
+        {
+            ToolTip(
+                "Дата должна быть в формате YYYY-MM-DD"
+            )
+
+            SetTimer(
+                () => ToolTip(),
+                -1400
+            )
+
+            return
+        }
+
+        data := BuildDailyAnalytics(
+            selected
+        )
+
+        callsValue.Value := data.calls
+        answeredValue.Value := data.answered
+        uniqueValue.Value := data.uniqueClients.Count
+        salesValue.Value := data.sales
+
+        if (data.calls > 0)
+        {
+            answerRate :=
+                (data.answered / data.calls) * 100
+
+            answerRateValue.Value :=
+                Format(
+                    "{:.1f}% ответов",
+                    answerRate
+                )
+
+            conversion :=
+                (data.sales / data.calls) * 100
+
+            conversionValue.Value :=
+                Format(
+                    "{:.1f}% конверсия",
+                    conversion
+                )
+        }
+        else
+        {
+            answerRateValue.Value := "0.0% ответов"
+            conversionValue.Value := "0.0% конверсия"
+        }
+
+        if (
+            data.busiestHour >= 0
+            && data.busiestHourCount > 0
+        )
+        {
+            peakValue.Value :=
+                Format(
+                    "{:02}:00–{:02}:00",
+                    data.busiestHour,
+                    Mod(
+                        data.busiestHour + 1,
+                        24
+                    )
+                )
+                . " (" . data.busiestHourCount . ")"
+        }
+        else
+        {
+            peakValue.Value := "—"
+        }
+
+        graphMax := 1
+
+        Loop 24
+        {
+            value := data.hourlyCalls[A_Index]
+
+            if (value > graphMax)
+                graphMax := value
+        }
+
+        Loop 24
+        {
+            value := data.hourlyCalls[A_Index]
+
+            percent := 0
+
+            if (value > 0)
+                percent :=
+                    (value / graphMax) * 100
+
+            hourRows[A_Index].progress.Value :=
+                percent
+
+            hourRows[A_Index].count.Value :=
+                value
+        }
+
+        if (
+            data.firstAction != ""
+            && data.lastAction != ""
+        )
+        {
+            workInfo.Value :=
+                "Работа: "
+                . data.firstAction
+                . " → "
+                . data.lastAction
+        }
+        else
+        {
+            workInfo.Value :=
+                "Работа: нет событий"
+        }
+
+        intervalInfo.Value :=
+            "Средний интервал: "
+            . StatsFormatDuration(
+                data.averageInterCallSeconds
+            )
+
+        retryInfo.Value :=
+            "Повторных попыток: "
+            . data.retries
+
+        noAnswerInfo.Value :=
+            "Не ответили: "
+            . data.noAnswer
+
+        idleInfo.Value :=
+            "Простои > 5 мин: "
+            . StatsFormatDuration(
+                data.idleSeconds
+            )
+
+        if (
+            data.bestSalesHour >= 0
+            && data.bestSalesHourCount > 0
+        )
+        {
+            bestSalesInfo.Value :=
+                "Лучший час по продажам: "
+                . Format(
+                    "{:02}:00–{:02}:00",
+                    data.bestSalesHour,
+                    Mod(
+                        data.bestSalesHour + 1,
+                        24
+                    )
+                )
+                . " (" . data.bestSalesHourCount . ")"
+        }
+        else
+        {
+            bestSalesInfo.Value :=
+                "Лучший час по продажам: —"
+        }
+
+        topButtons :=
+            StatsGetTopButtons(
+                data.buttons,
+                8
+            )
+
+        Loop 8
+        {
+            buttonRows[A_Index].key.Value := ""
+            buttonRows[A_Index].count.Value := ""
+        }
+
+        for idx, item in topButtons
+        {
+            if (idx > 8)
+                break
+
+            buttonRows[idx].key.Value :=
+                item.key
+
+            buttonRows[idx].count.Value :=
+                item.value . " раз"
+        }
+    }
+
+    ; В AHK v2 callback с несколькими операторами нельзя писать как (*) { ... }.
+    ; Используем именованные локальные callback-функции.
+    MoveAnalyticsDate(delta)
+    {
+        dateEdit.Value :=
+            StatsDateAdd(
+                Trim(dateEdit.Value),
+                delta
+            )
+
+        RefreshAnalytics()
+    }
+
+    SetAnalyticsToday()
+    {
+        global todayKey
+        dateEdit.Value := todayKey
+        RefreshAnalytics()
+    }
+
+    showBtn.OnEvent(
+        "Click",
+        (*) => RefreshAnalytics()
+    )
+
+    prevBtn.OnEvent(
+        "Click",
+        (*) => MoveAnalyticsDate(-1)
+    )
+
+    currentBtn.OnEvent(
+        "Click",
+        (*) => SetAnalyticsToday()
+    )
+
+    nextBtn.OnEvent(
+        "Click",
+        (*) => MoveAnalyticsDate(1)
+    )
+
     closeBtn.OnEvent(
         "Click",
-        (*) => hourlyGui.Destroy()
+        (*) => statsGui.Destroy()
     )
 
-    hourlyGui.OnEvent(
+    statsGui.OnEvent(
         "Close",
-        (*) => hourlyGui.Destroy()
+        (*) => statsGui.Destroy()
     )
 
-    ; ============================================================
-    ; ПОКАЗЫВАЕМ ОКНО
-    ; ============================================================
-
-    hourlyGui.Show(
-        "w750 h" . (bottomY + 60)
+    statsGui.Show(
+        "w870 h" . (buttonsTitleY + 215)
     )
 }
 
 
 $PgDn::{
+    StatsTrackButton("PgDn")
     Send("#r")
     Sleep(120)
     SendText("cmd")
@@ -1848,6 +3230,7 @@ $PgDn::{
 ; выключение компьютера; Escape или повторный Scroll Lock отменяют операцию.
 $ScrollLock::
 {
+    StatsTrackButton("ScrollLock")
     ToolTip("⚠️ ВНИМАНИЕ! Нажмите ENTER для ЗАКРЫТИЯ ПРОГРАММ И ВЫКЛЮЧЕНИЯ ПК (Escape для отмены)")
     
     loop
@@ -1916,6 +3299,7 @@ $ScrollLock::
 $*SC029::
 {
     global currentMode
+    StatsTrackButton("SC029")
 
     ; Режим 0: обычный ввод символа
     if (currentMode == 0)
