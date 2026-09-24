@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force
 
 ; ==============================================================================
@@ -71,15 +71,22 @@ OnExit(StatsOnExit)
 ; Python ZIK uses this heartbeat to know that Albert-V2 is alive.
 ; While heartbeat is alive, Python's native ZIK keyboard fallback does nothing.
 ; This prevents one physical key press from being handled twice.
-;SetTimer(ZikHeartbeat, 5000)
+SetTimer(ZikHeartbeat, 1000)
 
-ZikHeartbeat() {
-    try {
-        h := ComObject("WinHttp.WinHttpRequest.5.1")
-        h.Open("POST", "http://127.0.0.1:8765/event", false)
-        h.SetTimeouts(100, 100, 100, 100)
-        h.SetRequestHeader("Content-Type", "application/json")
-        h.Send('{"event":"ahk_heartbeat"}')
+ZikHeartbeat()
+{
+    try
+    {
+        http := ComObject("WinHttp.WinHttpRequest.5.1")
+        http.Open("POST", "http://127.0.0.1:8765/event", false)
+        http.SetTimeouts(250, 250, 250, 250)
+        http.SetRequestHeader("Content-Type", "application/json")
+        http.Send('{"event":"ahk_heartbeat"}')
+    }
+    catch
+    {
+        ; ZIK may be closed or not started yet.
+        ; Do not show a tooltip every second.
     }
 }
 ; ==============================================================================
@@ -1425,7 +1432,6 @@ RedialCurrentSapPhone()
 
 ; ==============================================================================
 ;                         ZIK — УПРАВЛЕНИЕ ИЗ AHK
-; Python ZIK writes exactly three Excel results: boradi / kotarmadi / kochadan.
 ; ==============================================================================
 ; В режиме ZIK (currentMode == 6):
 ;   F1           → завершить текущий звонок → следующий номер
@@ -2110,7 +2116,6 @@ $F7::
     }
     else if (currentMode == 3)
     {
-
         Send("{Ctrl Down}c{Ctrl Up}")
         Sleep(50)
         Send("!{Tab}")
@@ -2126,21 +2131,30 @@ $F7::
     }
     else
     {
-        Send("^c")
-        Sleep(100)
+        rawText := A_Clipboard
+        phone := CleanAndFormatPhone(rawText, true)
+        if (phone == "Error")
+        {
+            ToolTip("В буфере нет корректного номера!")
+            SetTimer(() => ToolTip(), -1000)
+            return
+        }
+
+        currentPhoneNum := CleanAndFormatPhone(phone, false)
+        ResetCallAttemptCounter()
+
         if WinExist("ahk_exe Telegram.exe")
             WinActivate("ahk_exe Telegram.exe")
 
         Sleep(60)
-        Send("{Escape}")
-        Sleep(100)
-        Send("{Escape 2}")
-        Sleep(100)
+        Send("{Escape 3}")
+        Sleep(80)
         Send("^f")
         Sleep(100)
-        SendText("998")
-        Sleep(100)
-        Send("^v")
+        Send("{Ctrl Down}a{Ctrl Up}{Backspace}")
+        Sleep(30)
+        A_Clipboard := phone
+        Send("{Ctrl Down}v{Ctrl Up}")
     }
 }
 
@@ -2397,21 +2411,21 @@ $Launch_Media::
         cleanNum
     )
 
-    Sleep(180)
+    Sleep(80)
     Send("#{2}")
-    Sleep(180)
+    Sleep(100)
     Send("{Escape 3}")
     Sleep(80)
     Send("^f")
-    Sleep(150)
+    Sleep(100)
     Send("{Escape}")
-    Sleep(150)
+    Sleep(100)
     Send("{Down 2}{Enter}")
     Sleep(250)
     Send("{Down}")
     Sleep(60)
     SendInput(cleanNum . " ")
-    Sleep(250)
+    Sleep(200)
     Send("^#{Right}")
 }
 ; Browser_Home: в режиме ZIK завершает текущий звонок и берет следующий номер;
@@ -2706,7 +2720,7 @@ $Home::
 {
     global currentMode
 
-    ;StatsTrackButton("Home")
+    StatsTrackButton("Home")
 
     if (currentMode == 0)
     {
@@ -3411,15 +3425,6 @@ $ScrollLock::
 }
 
 
-PgUp::{
-    SendText("comfort")
-    Sleep(50)
-    Send("{tab}")
-    Sleep(50)
-    SendText("1234")
-    Sleep(50)
-    Send("{Enter}")
-}
 ; ==============================================================================
 ;        7. УМНАЯ КЛАВИША Ё / ТИЛЬДА (SC029) - МЕГА КОМБО РОБОТ И ПАУЗА МУЗЫКИ
 ; ==============================================================================
@@ -3438,7 +3443,7 @@ $*SC029::
     }
 
     ; Режим 3: переключение Play/Pause
-    if (currentMode == 3 || currentMode == 5)
+    if (currentMode == 3)
     {
         Send("{Media_Play_Pause}")
         return
@@ -3649,7 +3654,7 @@ $*SC029::
 
     ; 4. Сбрасываем фокус и вызываем ГЛОБАЛЬНЫЙ поиск чатов (Ctrl+J) - он не откроет внутричатовый поиск!
     Send("{Escape 2}")
-    Sleep(500)
+    Sleep(100)
     Send("^f")
     Sleep(250)
     Send("^a{Backspace}")
