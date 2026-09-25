@@ -1,0 +1,18 @@
+[
+  {
+    "file": "C:\\Users\\Asko\\Desktop\\dev\\Albert\\output\\pdf\\Albert_Release_Manual_RU.pdf",
+    "pages": 23,
+    "bytes": 156523,
+    "text_chars": 29511,
+    "lowest_content_y": 142.9,
+    "source_sha256": "fe73a8a9af63bd8a7819720b45f6711fc269a5f43112622ae946af180ad72e2c"
+  },
+  {
+    "file": "C:\\Users\\Asko\\Desktop\\dev\\Albert\\output\\pdf\\Albert_Release_Manual_UZ.pdf",
+    "pages": 23,
+    "bytes": 134085,
+    "text_chars": 29728,
+    "lowest_content_y": 168.9,
+    "source_sha256": "fe73a8a9af63bd8a7819720b45f6711fc269a5f43112622ae946af180ad72e2c"
+  }
+]

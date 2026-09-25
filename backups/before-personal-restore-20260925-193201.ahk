@@ -10,7 +10,7 @@ global iniFile := A_ScriptDir . "\settings.ini"
 global todayKey := FormatTime(A_Now, "yyyy-MM-dd")
 global todaySales := IniRead(iniFile, "DailySales", todayKey, 0)
 
-; 0 = Normal, 1 = MicroSIP, 2 = Bitrix, 3 = Sverka, 4 = Telegram, 5 = SAP, 6 = ZIK
+; 0 = Normal, 1 = MicroSIP, 2 = Bitrix, 3 = Sverka, 4 = Telegram, 5 = SAP
 global currentMode := 2
 global lastWorkMode := 2
 
@@ -23,7 +23,8 @@ global statusSverkaF4 := IniRead(iniFile, "Statuses", "SverkaF4", "ko'chada")
 
 ; Тексты, которые F3 и F4 вводят в режиме SAP.
 ; Их можно изменить здесь, не затрагивая остальные сценарии скрипта.
-global sapF3Text := "Sayfuddinov Abdulloh"
+global sapF3Text := IniRead(iniFile, "Employee", "FullName", "")
+global employeeTag := IniRead(iniFile, "Employee", "Tag", "")
 global sapF4Text := "Mijozni telefon raqamiga boglana olmadik"
 
 
@@ -58,30 +59,13 @@ global widgetsVisible := false
 global lastSipX := -1
 global lastSipY := -1
 
-ToolTip("Режим: BITRIX (F12: SAP → ZIK → Telegram → MicroSIP | F11: Режимы | End: Normal)")
+ToolTip("Режим: BITRIX (F12: SAP → Telegram → MicroSIP | F11: Режимы | End: Normal)")
 SetTimer(() => ToolTip(), -3000)
 
 ; Статистика записывается в фоне, без I/O на каждом нажатии.
 SetTimer(StatsFlushLog, 1000)
 OnExit(StatsOnExit)
 
-; ==============================================================================
-;                         ZIK AHK HEARTBEAT
-; ==============================================================================
-; Python ZIK uses this heartbeat to know that Albert-V2 is alive.
-; While heartbeat is alive, Python's native ZIK keyboard fallback does nothing.
-; This prevents one physical key press from being handled twice.
-;SetTimer(ZikHeartbeat, 5000)
-
-ZikHeartbeat() {
-    try {
-        h := ComObject("WinHttp.WinHttpRequest.5.1")
-        h.Open("POST", "http://127.0.0.1:8765/event", false)
-        h.SetTimeouts(100, 100, 100, 100)
-        h.SetRequestHeader("Content-Type", "application/json")
-        h.Send('{"event":"ahk_heartbeat"}')
-    }
-}
 ; ==============================================================================
 ;                         2. ИНТЕРФЕЙС, ВИДЖЕТЫ MICROSIP И ИНДИКАТОР РЕЖИМА
 ; ==============================================================================
@@ -117,6 +101,7 @@ global modeGuiY := MB - modeGuiH
 
 modeWidget.Show("x" . modeGuiX . " y" . modeGuiY . " w" . modeGuiW . " h" . modeGuiH . " NoActivate")
 
+SetTimer(InitializeAlbertRelease, -50)
 SetTimer(AttachWidgetsToMicroSip, 100)
 SetTimer(KeepModeIndicatorVisible, 300)
 UpdateModeIndicator()
@@ -139,8 +124,6 @@ UpdateModeIndicator()
         modeText.Value := "TELEGRAM"
     else if (currentMode == 5)
         modeText.Value := "SAP"
-    else if (currentMode == 6)
-        modeText.Value := "ZIK"
 
     ; Возвращаем индикатор поверх Taskbar без перехвата фокуса
     WinSetAlwaysOnTop(1, modeWidget.Hwnd)
@@ -405,9 +388,6 @@ StatsGetModeName()
 
         case 5:
             return "SAP"
-
-        case 6:
-            return "ZIK"
 
 
         default:
@@ -1426,69 +1406,6 @@ RedialCurrentSapPhone()
 
 
 ; ==============================================================================
-;                         ZIK — УПРАВЛЕНИЕ ИЗ AHK
-; Python ZIK writes exactly three Excel results: boradi / kotarmadi / kochadan.
-; ==============================================================================
-; В режиме ZIK (currentMode == 6):
-;   F1           → завершить текущий звонок → следующий номер
-;   F2           → KOCHADAN → завершить звонок → следующий номер
-;   Launch_Media → KOCHADAN → завершить звонок → следующий номер
-;   Browser_Home → завершить текущий звонок → следующий номер
-;
-; AHK только отправляет команду в ZIK. Управление MicroSIP, завершение звонка
-; и переход к следующему номеру выполняет Python ZIK.
-; ==============================================================================
-
-ZikSendCommand(command)
-{
-    try
-    {
-        http := ComObject("WinHttp.WinHttpRequest.5.1")
-        http.Open("POST", "http://127.0.0.1:8765/event", false)
-        http.SetTimeouts(1000, 1000, 1000, 1000)
-        http.SetRequestHeader("Content-Type", "application/json")
-        http.Send('{"event":"' . command . '"}')
-
-        if (http.Status != 200)
-        {
-            ToolTip("ZIK: ошибка IPC (" . http.Status . ")")
-            SetTimer(() => ToolTip(), -1500)
-            return false
-        }
-
-        return true
-    }
-    catch
-    {
-        ToolTip("ZIK не запущен или IPC недоступен")
-        SetTimer(() => ToolTip(), -1800)
-        return false
-    }
-}
-
-ZikF1Next()
-{
-    StatsQueueEvent("F1", "ZIK_COMMAND", "", 0, "action=NEXT")
-
-    if ZikSendCommand("zik_next")
-    {
-        ToolTip("ZIK: звонок завершён → следующий номер")
-        SetTimer(() => ToolTip(), -1000)
-    }
-}
-
-ZikF2Kochadan()
-{
-    StatsQueueEvent("F2", "ZIK_COMMAND", "", 0, "action=KOCHADAN")
-
-    if ZikSendCommand("zik_kochadan")
-    {
-        ToolTip("ZIK: KOCHADAN → следующий номер")
-        SetTimer(() => ToolTip(), -1000)
-    }
-}
-
-; ==============================================================================
 ;                         4. НАСТРОЙКИ И ПЕРЕКЛЮЧЕНИЕ РЕЖИМОВ
 ; ==============================================================================
 
@@ -1538,7 +1455,7 @@ $F11::
 
 
 ; ================================================================
-; F12 — SAP → ZIK → TELEGRAM → MICROSIP → SAP
+; F12 — SAP → TELEGRAM → MICROSIP → SAP
 ; ================================================================
 
 $F12::
@@ -1550,7 +1467,6 @@ $F12::
     ; Если сейчас любой другой режим — начинаем цикл с SAP.
     if (
         currentMode != 5
-        && currentMode != 6
         && currentMode != 4
         && currentMode != 1
     )
@@ -1558,10 +1474,6 @@ $F12::
         currentMode := 5
     }
     else if (currentMode == 5)
-    {
-        currentMode := 6
-    }
-    else if (currentMode == 6)
     {
         currentMode := 4
     }
@@ -1592,12 +1504,6 @@ $F12::
             "РЕЖИМ: SAP (F1 — повтор | F2 — номер | F3/F4 — текст)"
         )
     }
-    else if (currentMode == 6)
-    {
-        ToolTip(
-            "РЕЖИМ: ZIK (F1 / Browser_Home — следующий | F2 / Launch_Media — KOCHADAN)"
-        )
-    }
     else if (currentMode == 4)
     {
         ToolTip("РЕЖИМ: TELEGRAM")
@@ -1615,7 +1521,9 @@ $F12::
 
 
 ; F10 открывает форму изменения текстов статусов для существующих сценариев.
-$F10::
+$F10::ShowAlbertSettings()
+
+ShowStatusSettings()
 {
     global statusF2, statusF3, statusF4, statusSverkaF2, statusSverkaF4
     StatsTrackButton("F10")
@@ -1682,12 +1590,6 @@ $F10::
 ; Во всех остальных режимах существующая логика сохраняется без изменений.
 $F1::
 {
-    if (currentMode == 6)
-    {
-        ZikF1Next()
-        return
-    }
-
     global callCount, currentPhoneNum, currentMode
     StatsTrackButton("F1")
 
@@ -1749,12 +1651,6 @@ $F1::
 ; Во всех остальных режимах существующая логика сохраняется без изменений.
 $F2::
 {
-    if (currentMode == 6)
-    {
-        ZikF2Kochadan()
-        return
-    }
-
     global currentPhoneNum, callCount, currentMode, statusSverkaF2
     StatsTrackButton("F2")
 
@@ -2099,8 +1995,8 @@ $F4::
 ; F6 перезапускает MicroSIP с явно включённым DND.
 RestartMicroSipWithDnd()
 {
-    sipIni := A_AppData . "\MicroSIP\microsip.ini"
-    sipExe := EnvGet("LOCALAPPDATA") . "\MicroSIP\microsip.exe"
+    sipIni := AlbertPath("MicroSipIni")
+    sipExe := AlbertPath("MicroSip")
 
     try
     {
@@ -2422,12 +2318,6 @@ $PrintScreen::
 ; Во всех остальных режимах сохраняется прежний Telegram-сценарий ниже.
 $Launch_Media::
 {
-    if (currentMode == 6)
-    {
-        ZikF2Kochadan()
-        return
-    }
-
     StatsTrackButton(
         A_ThisHotkey
     )
@@ -2479,12 +2369,6 @@ $Launch_Media::
 ; во всех остальных режимах закрывает текущую вкладку и переключает виртуальный рабочий стол влево.
 $Browser_Home::
 {
-    if (currentMode == 6)
-    {
-        ZikF1Next()
-        return
-    }
-
     StatsTrackButton("Browser_Home")
 
 
@@ -3472,15 +3356,6 @@ $ScrollLock::
 }
 
 
-PgUp::{
-    SendText("comfort")
-    Sleep(50)
-    Send("{tab}")
-    Sleep(50)
-    SendText("1234")
-    Sleep(50)
-    Send("{Enter}")
-}
 ; ==============================================================================
 ;        7. УМНАЯ КЛАВИША Ё / ТИЛЬДА (SC029) - МЕГА КОМБО РОБОТ И ПАУЗА МУЗЫКИ
 ; ==============================================================================
@@ -3518,7 +3393,7 @@ ParseFirstWarehouseRow(selection)
 
 $*SC029::
 {
-    global currentMode
+    global currentMode, employeeTag
     StatsTrackButton("SC029")
 
     ; Режим 0: обычный ввод символа
@@ -3581,7 +3456,518 @@ $*SC029::
     rawBranch := order.branch
     cleanName := order.name
 
-    branchExceptions := Map(
+    branchExceptions := LoadAlbertBranches()
+
+    tgGroupName := ""
+    if branchExceptions.Has(rawBranch)
+        tgGroupName := branchExceptions[rawBranch]
+    else
+    {
+        ToolTip("Филиал не настроен: " . rawBranch . ". Добавьте его через F10 → Филиалы.")
+        SetTimer(() => ToolTip(), -3500)
+        return
+    }
+
+    if (tgGroupName == "")
+    {
+        ToolTip("Не удалось определить группу филиала.")
+        SetTimer(() => ToolTip(), -2000)
+        return
+    }
+
+    ; КАЛЬКУЛЯТОР (Стол 3)
+    Send("#{4}")
+    Sleep(250)
+    Send("{Escape}")
+    Sleep(50)
+
+    ; Сохраняем расчёт в тысячах сумов: 418 000 UZS → 418 × 4.
+    ; Деление вместо обрезки цифр сохраняет дробную часть цены.
+    A_Clipboard := order.priceUzs
+    Send("^v")
+    Sleep(60)
+    Send("/1000{Enter}")
+    Sleep(60)
+    Send("*4{Enter}")
+    Sleep(200)
+
+    ; ТЕЛЕГРАМ (Стол 2)
+    Sleep(150)
+
+    ; Переходим со Стола 3 на Стол 2
+    Send("^#{Left}")
+    Sleep(250)
+
+    ; Активируем Telegram напрямую, чтобы не перебивало
+    Send("#{2}")
+    Sleep(300)
+
+    if !WinWaitActive("ahk_exe Telegram.exe",, 2)
+    {
+        ToolTip("Telegram не активен. Отправка остановлена.")
+        SetTimer(() => ToolTip(), -2000)
+        return
+    }
+
+    ; 1. Встаём в конец номера в поле сообщения текущей группы.
+    Send("^{End}")
+    Sleep(60)
+
+    ; 2. Добавляем пробел, название товара и хэштег ПОСЛЕ номера
+    A_Clipboard := "  " . cleanName . " " . employeeTag
+    Send("^v")
+    Sleep(120)
+
+    ; 3. Копируем готовое сообщение и отправляем в текущую группу (sotuv).
+    Send("^a")
+    Sleep(60)
+    A_Clipboard := ""
+    Send("^c")
+    if !ClipWait(1)
+    {
+        ToolTip("Не удалось скопировать сообщение. Отправка остановлена.")
+        SetTimer(() => ToolTip(), -2000)
+        return
+    }
+    orderMessage := A_Clipboard
+    Send("{Enter}")
+    Sleep(200)
+
+    ; 4. Выходим из текущей группы и открываем поиск чатов.
+    Send("{Escape 2}")
+    Sleep(500)
+    Send("^f")
+    Sleep(250)
+    Send("^a{Backspace}")
+    Sleep(60)
+
+    ; 5. Вбиваем имя филиала и заходим в группу
+    SendText(tgGroupName)
+    Sleep(650)
+    Send("{Down}")
+    Sleep(100)
+    Send("{Enter}")
+    Sleep(300)
+
+    ; 6. Вставляем скопированное сообщение в найденную группу и отправляем
+    A_Clipboard := orderMessage
+    Send("^v")
+    Sleep(120)
+    Send("{Enter}")
+    Sleep(200)
+
+    ; ВОЗВРАТ В CRM (на Стол 3)
+    Send("^#{Right}")
+
+    ToolTip("✅ Готово! Отправлено в текущую группу и в " . tgGroupName)
+    SetTimer(() => ToolTip(), -3000)
+}
+
+; RELEASE: настройки и автозапуск. Скрипт устанавливается пользователем в C:\Albert.
+InitializeAlbertRelease()
+{
+    global iniFile
+    A_TrayMenu.Add("Настройки Albert (F10)", (*) => ShowAlbertSettings())
+    if (IniRead(iniFile, "Setup", "Complete", 0) != 1)
+    {
+        ShowAlbertSettings(true)
+        return
+    }
+    if (A_Args.Length > 0 && A_Args[1] == "--startup")
+        SetTimer(StartAlbertWorkspace, -10000)
+}
+
+CreateAlbertStartupShortcut(shortcutPath)
+{
+    FileCreateShortcut(A_AhkPath, shortcutPath, A_ScriptDir,
+        '"' . A_ScriptFullPath . '" --startup', "Albert — рабочее окружение")
+}
+
+AlbertPath(key)
+{
+    global iniFile
+    return IniRead(iniFile, "Paths", key, "")
+}
+
+DetectAlbertPath(key)
+{
+    saved := AlbertPath(key)
+    if (saved != "")
+        return saved
+    localDir := EnvGet("LOCALAPPDATA")
+    pf := EnvGet("ProgramFiles")
+    pf86 := EnvGet("ProgramFiles(x86)")
+    candidates := Map(
+        "MicroSip", [localDir . "\MicroSIP\microsip.exe", pf . "\MicroSIP\microsip.exe", pf86 . "\MicroSIP\microsip.exe"],
+        "MicroSipIni", [A_AppData . "\MicroSIP\microsip.ini"],
+        "Telegram", [A_AppData . "\Telegram Desktop\Telegram.exe", localDir . "\Telegram Desktop\Telegram.exe"],
+        "Browser", [pf . "\Google\Chrome\Application\chrome.exe", pf86 . "\Google\Chrome\Application\chrome.exe", localDir . "\Google\Chrome\Application\chrome.exe"])
+    if candidates.Has(key)
+        for candidate in candidates[key]
+            if FileExist(candidate)
+                return candidate
+    return ""
+}
+
+LoadAlbertBranches()
+{
+    global iniFile
+    if (IniRead(iniFile, "BranchConfig", "Custom", 0) != 1)
+        return DefaultAlbertBranches()
+    branches := Map()
+    Loop Parse IniRead(iniFile, "Branches",, ""), "`n", "`r"
+    {
+        pos := InStr(A_LoopField, "=")
+        if pos
+            branches[Trim(SubStr(A_LoopField, 1, pos - 1))] := Trim(SubStr(A_LoopField, pos + 1))
+    }
+    return branches
+}
+
+SaveAlbertBranches(branches)
+{
+    global iniFile
+    section := ""
+    for branch, group in branches
+    {
+        if (Trim(branch) == "" || Trim(group) == "" || RegExMatch(branch . group, "[=\r\n\[\]]"))
+            throw Error("Название склада и группы не должно быть пустым или содержать =, скобки и переносы строк.")
+        section .= branch . "=" . group . "`n"
+    }
+    tempFile := iniFile . ".branches.tmp"
+    try
+    {
+        if FileExist(iniFile)
+            FileCopy(iniFile, tempFile, true)
+        try IniDelete(tempFile, "Branches")
+        if (section != "")
+            IniWrite(RTrim(section, "`n"), tempFile, "Branches")
+        IniWrite(1, tempFile, "BranchConfig", "Custom")
+        FileMove(tempFile, iniFile, true)
+    }
+    finally
+    {
+        if FileExist(tempFile)
+            FileDelete(tempFile)
+    }
+}
+
+ShowAlbertBranches(*)
+{
+    branches := LoadAlbertBranches()
+    g := Gui(, "Albert — филиалы")
+    g.SetFont("s10", "Segoe UI")
+    list := g.Add("ListView", "w730 r13", ["Склад", "Группа Telegram"])
+    g.Add("Text", "xm", "Название склада (точно как в CRM)")
+    branchEdit := g.Add("Edit", "w730")
+    g.Add("Text",, "Название группы Telegram")
+    groupEdit := g.Add("Edit", "w730")
+    g.Add("Button", "xm w230", "Добавить / сохранить изменение").OnEvent("Click", SaveBranch)
+    g.Add("Button", "x+10 w200", "Удалить выбранный").OnEvent("Click", DeleteBranch)
+    g.Add("Button", "x+10 w160", "Очистить поля").OnEvent("Click", ClearFields)
+    selectedName := ""
+    list.OnEvent("ItemSelect", SelectBranch)
+    RefreshBranches()
+    g.Show()
+
+    RefreshBranches()
+    {
+        list.Delete()
+        for branch, group in branches
+            list.Add(, branch, group)
+        list.ModifyCol(1, 310)
+        list.ModifyCol(2, 390)
+    }
+    SelectBranch(ctrl, row, selected)
+    {
+        if !selected
+            return
+        selectedName := list.GetText(row, 1)
+        branchEdit.Value := selectedName
+        groupEdit.Value := list.GetText(row, 2)
+    }
+    ClearFields(*)
+    {
+        selectedName := ""
+        branchEdit.Value := ""
+        groupEdit.Value := ""
+        list.Modify(0, "-Select")
+    }
+    SaveBranch(*)
+    {
+        name := Trim(branchEdit.Value)
+        group := Trim(groupEdit.Value)
+        updated := branches.Clone()
+        if (name != selectedName && updated.Has(name))
+        {
+            MsgBox("Такой склад уже есть. Выберите его для изменения.")
+            return
+        }
+        if (selectedName != "" && updated.Has(selectedName))
+            updated.Delete(selectedName)
+        updated[name] := group
+        try SaveAlbertBranches(updated)
+        catch as err
+        {
+            MsgBox(err.Message)
+            return
+        }
+        branches := updated
+        ClearFields()
+        RefreshBranches()
+    }
+    DeleteBranch(*)
+    {
+        if (selectedName == "")
+            return
+        if (MsgBox("Удалить склад «" . selectedName . "»?", "Albert", "YesNo") != "Yes")
+            return
+        updated := branches.Clone()
+        updated.Delete(selectedName)
+        try SaveAlbertBranches(updated)
+        catch as err
+        {
+            MsgBox(err.Message)
+            return
+        }
+        branches := updated
+        ClearFields()
+        RefreshBranches()
+    }
+}
+
+ShowAlbertSettings(firstRun := false)
+{
+    global iniFile, sapF3Text, employeeTag
+    static settingsWindow := 0
+    if IsObject(settingsWindow)
+    {
+        try
+        {
+            settingsWindow.Show()
+            return
+        }
+    }
+    Suspend(true)
+    g := Gui(, firstRun ? "Albert — первая настройка" : "Albert — настройки")
+    settingsWindow := g
+    g.SetFont("s10", "Segoe UI")
+    g.Add("Text", "w760", "Папка установки: C:\Albert. Автозагрузка открывает программы; ручной запуск — только Albert.")
+    g.Add("Text", "w760", "Закрепите: Win+1 MicroSIP • Win+2 Telegram • Win+3 браузер • Win+4 калькулятор.")
+    g.Add("Text", "xm", "Полное имя сотрудника для SAP")
+    fullName := g.Add("Edit", "w760", sapF3Text)
+    g.Add("Text",, "Подпись Telegram (например, #Abdulloh)")
+    tag := g.Add("Edit", "w760", employeeTag)
+    fields := Map()
+    labels := Map("MicroSip", "MicroSIP (.exe)", "MicroSipIni", "Настройки MicroSIP (.ini)",
+        "Telegram", "Telegram (.exe)", "Browser", "Браузер Chrome/Edge (.exe)",
+        "Sizes", "Таблица размеров (необязательно)", "Addresses", "Таблица адресов (необязательно)")
+    for key in ["MicroSip", "MicroSipIni", "Telegram", "Browser", "Sizes", "Addresses"]
+    {
+        g.Add("Text", "xm", labels[key])
+        edit := g.Add("Edit", "xm w650", DetectAlbertPath(key))
+        fields[key] := edit
+        g.Add("Button", "x+10 w100", "Выбрать…").OnEvent("Click", BrowsePath.Bind(edit, key))
+    }
+    note := g.Add("Text", "xm w760 c666666", "После сохранения программы не открываются. Окна появятся при следующем входе в Windows.")
+    g.Add("Button", "xm w200 Default", "Сохранить и включить").OnEvent("Click", SaveSettings)
+    g.Add("Button", "x+10 w170", "Статусы F2/F3/F4").OnEvent("Click", (*) => ShowStatusSettings())
+    g.Add("Button", "x+10 w170", "Филиалы…").OnEvent("Click", ShowAlbertBranches)
+    g.OnEvent("Close", CloseSettings)
+    g.OnEvent("Escape", CloseSettings)
+    g.Show()
+
+    BrowsePath(edit, key, *)
+    {
+        filter := key == "MicroSipIni" ? "INI (*.ini)" : (key == "Sizes" || key == "Addresses") ? "Таблицы (*.xlsx; *.xls; *.csv)" : "Программы (*.exe)"
+        selected := FileSelect(1, edit.Value, "Выберите файл", filter)
+        if (selected != "")
+            edit.Value := selected
+    }
+    CloseSettings(*)
+    {
+        g.Destroy()
+        settingsWindow := 0
+        if firstRun
+            ExitApp()
+        Suspend(false)
+    }
+    SaveSettings(*)
+    {
+        if (StrLower(RTrim(A_ScriptDir, "\")) != "c:\albert")
+        {
+            MsgBox("Поместите Albert-V2.ahk в C:\Albert и запустите оттуда. Файлы автоматически не перемещаются.")
+            return
+        }
+        name := Trim(fullName.Value)
+        signature := Trim(tag.Value)
+        if (name == "" || !RegExMatch(signature, "^#?[\p{L}\p{N}_]+$"))
+        {
+            MsgBox("Введите полное имя и подпись без пробелов, например #Abdulloh.")
+            return
+        }
+        signature := "#" . LTrim(signature, "#")
+        for key, edit in fields
+        {
+            path := Trim(edit.Value, ' "')
+            if (path == "" && (key == "Sizes" || key == "Addresses"))
+                continue
+            if (!FileExist(path) || InStr(FileExist(path), "D"))
+            {
+                MsgBox("Не найден файл: " . labels[key] . "`n" . path)
+                return
+            }
+        }
+        try
+        {
+            ; Complete выставляем только после успешного создания ярлыка.
+            IniWrite(0, iniFile, "Setup", "Complete")
+            for key, edit in fields
+                IniWrite(Trim(edit.Value, ' "'), iniFile, "Paths", key)
+            IniWrite(name, iniFile, "Employee", "FullName")
+            IniWrite(signature, iniFile, "Employee", "Tag")
+            CreateAlbertStartupShortcut(A_Startup . "\Albert.lnk")
+            IniWrite(1, iniFile, "Setup", "Complete")
+        }
+        catch as err
+        {
+            MsgBox("Не удалось сохранить настройки или ярлык автозагрузки.`n" . err.Message)
+            return
+        }
+        sapF3Text := name
+        employeeTag := signature
+        firstRun := false
+        CloseSettings()
+        ToolTip("Albert настроен. Автозагрузка включена.")
+        SetTimer(() => ToolTip(), -2500)
+    }
+}
+
+AlbertDesktopCount()
+{
+    ids := RegRead("HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops", "VirtualDesktopIDs", "")
+    ; На новом профиле до создания второго стола список может отсутствовать.
+    if (ids == "")
+        return 1
+    ; RegRead возвращает REG_BINARY как HEX-строку: GUID = 32 символа.
+    count := StrLen(ids) // 32
+    if (count < 1 || Mod(StrLen(ids), 32) != 0)
+        throw Error("Не удалось определить рабочие столы Windows.")
+    return count
+}
+
+AlbertGoDesktop(number)
+{
+    count := AlbertDesktopCount()
+    Loop count
+    {
+        Send("^#{Left}")
+        Sleep(180)
+    }
+    Loop number - 1
+    {
+        Send("^#{Right}")
+        Sleep(180)
+    }
+    Sleep(300)
+}
+
+StartAlbertWorkspace()
+{
+    global iniFile
+    static started := false
+    if started
+        return
+    started := true
+    Suspend(true)
+    failures := ""
+    try
+    {
+        ; Не удаляем существующие столы; создаём только недостающие.
+        count := AlbertDesktopCount()
+        Loop Max(0, 4 - count)
+        {
+            Send("^#d")
+            Sleep(600)
+        }
+        if (AlbertDesktopCount() < 4)
+            throw Error("Windows не создала четыре рабочих стола.")
+        AlbertGoDesktop(2)
+        LaunchApp("Telegram", "Telegram.exe")
+        LaunchApp("MicroSip", "microsip.exe")
+        LaunchPage("https://ababin.bitrix24.kz/crm/deal/kanban/category/0/")
+        AlbertGoDesktop(3)
+        try
+        {
+            if !WinExist("ahk_exe CalculatorApp.exe") && !WinExist("ahk_exe calculator.exe")
+                Run("calc.exe")
+            Sleep(2500)
+        }
+        catch as err
+            failures .= "Калькулятор: " . err.Message . "`n"
+        LaunchPage("http://185.100.53.213:3000/warehouse-balance-report-crm#")
+        AlbertGoDesktop(4)
+        for key in ["Sizes", "Addresses"]
+        {
+            path := AlbertPath(key)
+            if (path == "")
+                continue
+            try
+            {
+                if !FileExist(path)
+                    throw Error("Файл не найден: " . path)
+                Run('"' . path . '"')
+                Sleep(4000)
+            }
+            catch as err
+                failures .= err.Message . "`n"
+        }
+        AlbertGoDesktop(2)
+        if WinExist("ahk_exe microsip.exe")
+            WinActivate("ahk_exe microsip.exe")
+    }
+    catch as err
+        failures .= err.Message . "`n"
+    finally
+        Suspend(false)
+    if (failures != "")
+        MsgBox("Не всё удалось открыть. Проверьте F10:`n`n" . failures, "Albert — запуск")
+
+    LaunchApp(key, exe)
+    {
+        try
+        {
+            if ProcessExist(exe)
+                return
+            path := AlbertPath(key)
+            if !FileExist(path)
+                throw Error("Не найден " . key . ": " . path)
+            Run('"' . path . '"')
+            if !WinWait("ahk_exe " . exe,, 10)
+                throw Error("Окно " . key . " не появилось.")
+            Sleep(1000)
+        }
+        catch as err
+            failures .= err.Message . "`n"
+    }
+    LaunchPage(url)
+    {
+        try
+        {
+            browser := AlbertPath("Browser")
+            if !FileExist(browser)
+                throw Error("Браузер не найден: " . browser)
+            Run('"' . browser . '" --new-window "' . url . '"')
+            Sleep(4000)
+        }
+        catch as err
+            failures .= err.Message . "`n"
+    }
+}
+
+DefaultAlbertBranches()
+{
+    return Map(
         "TS - Tashkent-Sergeli1", "Sergili call center",
         "S2 - ASKO Sergeli2", "SERGELI 2",
         "YD - ASKO Yashnaobod", "YASHNOBOD CALL CENTRE",
@@ -3661,114 +4047,12 @@ $*SC029::
         "CT2 - ASKO Chust", "Chust filiali CALL SENTR"
     )
 
-    tgGroupName := ""
-    if branchExceptions.Has(rawBranch)
-        tgGroupName := branchExceptions[rawBranch]
-    else
-    {
-        tgGroupName := RegExReplace(rawBranch, "i)^[A-Z0-9]+\s*-\s*(asko[-\s]*|)", "")
-        tgGroupName := Trim(tgGroupName)
-    }
-
-    if (tgGroupName == "")
-    {
-        ToolTip("Не удалось определить группу филиала.")
-        SetTimer(() => ToolTip(), -2000)
-        return
-    }
-
-    ; КАЛЬКУЛЯТОР (Стол 4)
-    Send("#{4}")
-    Sleep(250)
-    Send("{Escape}")
-    Sleep(50)
-
-    ; Сохраняем расчёт в тысячах сумов: 418 000 UZS → 418 × 4.
-    ; Деление вместо обрезки цифр сохраняет дробную часть цены.
-    A_Clipboard := order.priceUzs
-    Send("^v")
-    Sleep(60)
-    Send("/1000{Enter}")
-    Sleep(60)
-    Send("*4{Enter}")
-    Sleep(200)
-
-    ; ТЕЛЕГРАМ (Стол 3)
-    Sleep(150)
-
-    ; Переходим со Стола 4 на Стол 3
-    Send("^#{Left}")
-    Sleep(250)
-
-    ; Активируем Telegram напрямую, чтобы не перебивало
-    Send("#{2}")
-    Sleep(300)
-
-    if !WinWaitActive("ahk_exe Telegram.exe",, 2)
-    {
-        ToolTip("Telegram не активен. Отправка остановлена.")
-        SetTimer(() => ToolTip(), -2000)
-        return
-    }
-
-    ; 1. Встаём в конец номера в поле сообщения текущей группы.
-    Send("^{End}")
-    Sleep(60)
-
-    ; 2. Добавляем пробел, название товара и хэштег ПОСЛЕ номера
-    A_Clipboard := "  " . cleanName . " #Abdulloh"
-    Send("^v")
-    Sleep(120)
-
-    ; 3. Копируем готовое сообщение и отправляем в текущую группу (sotuv).
-    Send("^a")
-    Sleep(60)
-    A_Clipboard := ""
-    Send("^c")
-    if !ClipWait(1)
-    {
-        ToolTip("Не удалось скопировать сообщение. Отправка остановлена.")
-        SetTimer(() => ToolTip(), -2000)
-        return
-    }
-    orderMessage := A_Clipboard
-    Send("{Enter}")
-    Sleep(200)
-
-    ; 4. Выходим из текущей группы и открываем поиск чатов.
-    Send("{Escape 2}")
-    Sleep(500)
-    Send("^f")
-    Sleep(250)
-    Send("^a{Backspace}")
-    Sleep(60)
-
-    ; 5. Вбиваем имя филиала и заходим в группу
-    SendText(tgGroupName)
-    Sleep(650)
-    Send("{Down}")
-    Sleep(100)
-    Send("{Enter}")
-    Sleep(300)
-
-    ; 6. Вставляем скопированное сообщение в найденную группу и отправляем
-    A_Clipboard := orderMessage
-    Send("^v")
-    Sleep(120)
-    Send("{Enter}")
-    Sleep(200)
-
-    ; ВОЗВРАТ В CRM (на Стол 4)
-    Send("^#{Right}")
-
-    ToolTip("✅ Готово! Отправлено в текущую группу и в " . tgGroupName)
-    SetTimer(() => ToolTip(), -3000)
 }
 
 DisableMicroSipDnd()
 {
-    sipIni := A_AppData . "\MicroSIP\microsip.ini"
-    sipExe := EnvGet("LOCALAPPDATA") . "\MicroSIP\microsip.exe"
+    sipIni := AlbertPath("MicroSipIni")
+    sipExe := AlbertPath("MicroSip")
 
     try
     {
