@@ -2157,7 +2157,8 @@ $F6::
         Send("{F6}")
         return
     }
-
+    Send("#{1}")
+    Sleep(50)
     RestartMicroSipWithDnd()
 }
 
@@ -3830,7 +3831,8 @@ Pause:: {
         Send("{Pause}")
         return
     }
-
-DisableMicroSipDnd()
+    Send("#{1}")
+    Sleep(50)
+    DisableMicroSipDnd()
 
 }
